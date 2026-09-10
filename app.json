@@ -12,7 +12,8 @@
       "backgroundColor": "#0f172a"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.healthconnect.app"
     },
     "android": {
       "adaptiveIcon": {

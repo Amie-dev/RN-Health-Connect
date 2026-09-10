@@ -5,7 +5,7 @@ import {
   Animated,
   Easing,
   Modal,
-
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
@@ -19,7 +19,6 @@ import {
   SafeAreaProvider,
   SafeAreaInsetsContext,
   useSafeAreaInsets,
-  Pressable as SafePressable,
 } from 'react-native-safe-area-context';
 // Design tokens
 import { palette as C, radius as R, spacing as S } from '../theme';
@@ -107,6 +106,94 @@ function getGreeting(): string {
   return 'Good Evening';
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+ * Animation primitives — built on React Native's built-in Animated API so the
+ * app feels alive without adding any native dependencies.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** Fade + slide-up entrance that plays once when the view mounts. */
+function Reveal({
+  children,
+  delay = 0,
+  duration = 480,
+  style,
+}: {
+  children: React.ReactNode;
+  delay?: number;
+  duration?: number;
+  style?: any;
+}) {
+  const progress = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const anim = Animated.timing(progress, {
+      toValue: 1,
+      delay,
+      duration,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [progress, delay, duration]);
+
+  return (
+    <Animated.View
+      style={[
+        style,
+        {
+          opacity: progress,
+          transform: [
+            { translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [22, 0] }) },
+          ],
+        },
+      ]}
+    >
+      {children}
+    </Animated.View>
+  );
+}
+
+/** Tactile press feedback: springs down on touch, bounces back on release. */
+function PressableScale({
+  children,
+  onPress,
+  onLongPress,
+  disabled,
+  style,
+  outerStyle,
+  scaleTo = 0.955,
+}: {
+  children: React.ReactNode;
+  onPress?: () => void;
+  onLongPress?: () => void;
+  disabled?: boolean;
+  style?: any;
+  outerStyle?: any;
+  scaleTo?: number;
+}) {
+  const scale = useRef(new Animated.Value(1)).current;
+
+  const pressIn = () =>
+    Animated.spring(scale, { toValue: scaleTo, useNativeDriver: true, speed: 40, bounciness: 4 }).start();
+  const pressOut = () =>
+    Animated.spring(scale, { toValue: 1, useNativeDriver: true, speed: 22, bounciness: 7 }).start();
+
+  return (
+    <Pressable
+      onPress={onPress}
+      onLongPress={onLongPress}
+      disabled={disabled}
+      onPressIn={pressIn}
+      onPressOut={pressOut}
+      style={outerStyle}
+    >
+      <Animated.View style={[style, { transform: [{ scale }] }]}>{children}</Animated.View>
+    </Pressable>
+  );
+}
+
+// __MORE_PRIMITIVES__
 
 export default function HealthDashboard() {
   // SDK & Permission state

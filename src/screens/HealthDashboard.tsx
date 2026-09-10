@@ -193,7 +193,209 @@ function PressableScale({
   );
 }
 
-// __MORE_PRIMITIVES__
+/** Endless breathing pulse — used for the live heart avatar and LIVE badge. */
+function Pulse({
+  children,
+  minScale = 1,
+  maxScale = 1.15,
+  duration = 1300,
+  style,
+}: {
+  children: React.ReactNode;
+  minScale?: number;
+  maxScale?: number;
+  duration?: number;
+  style?: any;
+}) {
+  const pulse = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, {
+          toValue: 1,
+          duration: duration * 0.42,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulse, {
+          toValue: 0,
+          duration: duration * 0.58,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse, duration]);
+
+  return (
+    <Animated.View
+      style={[
+        style,
+        {
+          transform: [
+            { scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [minScale, maxScale] }) },
+          ],
+        },
+      ]}
+    >
+      {children}
+    </Animated.View>
+  );
+}
+
+/** Number that counts up (and re-counts) whenever its value changes. */
+function CountUp({
+  value,
+  format,
+  duration = 950,
+  style,
+}: {
+  value: number | null;
+  format: (n: number) => string;
+  duration?: number;
+  style?: any;
+}) {
+  const [text, setText] = useState(() => (value == null ? '--' : format(value)));
+  const anim = useRef(new Animated.Value(1)).current;
+  const prevRef = useRef<number | null>(value);
+
+  useEffect(() => {
+    if (value == null) {
+      prevRef.current = null;
+      setText('--');
+      return;
+    }
+    const from = prevRef.current ?? 0;
+    prevRef.current = value;
+    if (from === value) {
+      setText(format(value));
+      return;
+    }
+    anim.setValue(0);
+    const listenerId = anim.addListener(({ value: t }) =>
+      setText(format(from + (value - from) * t))
+    );
+    const timer = Animated.timing(anim, {
+      toValue: 1,
+      duration,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    });
+    timer.start();
+    return () => {
+      anim.removeListener(listenerId);
+      timer.stop();
+    };
+  }, [value, format, duration, anim]);
+
+  return (
+    <Text style={style} numberOfLines={1}>
+      {text}
+    </Text>
+  );
+}
+
+/** Goal progress bar that eases to its target width whenever `pct` changes. */
+function GoalBar({ pct, color, track }: { pct: number; color: string; track: string }) {
+  const progress = useRef(new Animated.Value(0)).current;
+  const target = Math.max(0, Math.min(100, pct));
+
+  useEffect(() => {
+    const anim = Animated.timing(progress, {
+      toValue: target,
+      duration: 1100,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: false,
+    });
+    anim.start();
+    return () => anim.stop();
+  }, [target, progress]);
+
+  return (
+    <View style={[styles.barTrack, { backgroundColor: track }]}>
+      <Animated.View
+        style={[
+          styles.barFill,
+          {
+            backgroundColor: color,
+            width: progress.interpolate({ inputRange: [0, 100], outputRange: ['0%', '100%'] }),
+          },
+        ]}
+      />
+    </View>
+  );
+}
+
+/** Spins its children in an endless loop while `spinning` is true. */
+function Spin({ children, spinning }: { children: React.ReactNode; spinning: boolean }) {
+  const rot = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (!spinning) return;
+    const loop = Animated.loop(
+      Animated.timing(rot, {
+        toValue: 1,
+        duration: 850,
+        easing: Easing.linear,
+        useNativeDriver: true,
+      })
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [spinning, rot]);
+
+  if (!spinning) return <>{children}</>;
+
+  return (
+    <Animated.View
+      style={{
+        transform: [{ rotate: rot.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] }) }],
+      }}
+    >
+      {children}
+    </Animated.View>
+  );
+}
+
+/** Tab with a spring-in emerald pill behind the label. */
+function TabButton({
+  active,
+  label,
+  onPress,
+}: {
+  active: boolean;
+  label: string;
+  onPress: () => void;
+}) {
+  const glow = useRef(new Animated.Value(active ? 1 : 0)).current;
+
+  useEffect(() => {
+    Animated.spring(glow, {
+      toValue: active ? 1 : 0,
+      useNativeDriver: true,
+      speed: 28,
+      bounciness: 5,
+    }).start();
+  }, [active, glow]);
+
+  return (
+    <Pressable onPress={onPress} style={styles.tabItem}>
+      <Animated.View
+        style={[
+          styles.tabPill,
+          {
+            opacity: glow,
+            transform: [{ scale: glow.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) }],
+          },
+        ]}
+      />
+      <Text style={[styles.tabText, active && styles.tabTextActive]}>{label}</Text>
+    </Pressable>
+  );
+}
 
 export default function HealthDashboard() {
   // SDK & Permission state
@@ -544,94 +746,128 @@ export default function HealthDashboard() {
         </Reveal>
 
         {/* Quick Links */}
-        <View style={styles.quickLinksRow}>
-          <TouchableOpacity style={styles.quickLink} onPress={openSettings}>
-            <Text style={styles.quickLinkIcon}>⚙️</Text>
-            <Text style={styles.quickLinkText}>System Settings</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.quickLink} onPress={() => openDataManagement()}>
-            <Text style={styles.quickLinkIcon}>🗂️</Text>
-            <Text style={styles.quickLinkText}>Manage Data</Text>
-          </TouchableOpacity>
-        </View>
+        <Reveal delay={150}>
+          <View style={styles.quickLinksRow}>
+            <PressableScale outerStyle={{ flex: 1 }} style={styles.quickLink} onPress={openSettings}>
+              <Text style={styles.quickLinkIcon}>⚙️</Text>
+              <Text style={styles.quickLinkText}>System Settings</Text>
+            </PressableScale>
+            <PressableScale
+              outerStyle={{ flex: 1 }}
+              style={styles.quickLink}
+              onPress={() => openDataManagement()}
+            >
+              <Text style={styles.quickLinkIcon}>🗂️</Text>
+              <Text style={styles.quickLinkText}>Manage Data</Text>
+            </PressableScale>
+          </View>
+        </Reveal>
 
         {/* Error Notification */}
         {error && (
-          <View style={styles.errorBox}>
-            <Text style={styles.errorIcon}>⚠️</Text>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.errorTitle}>Something needs attention</Text>
-              <Text style={styles.errorText}>{error}</Text>
+          <Reveal delay={120}>
+            <View style={styles.errorBox}>
+              <Text style={styles.errorIcon}>⚠️</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.errorTitle}>Something needs attention</Text>
+                <Text style={styles.errorText}>{error}</Text>
+              </View>
             </View>
-          </View>
+          </Reveal>
         )}
 
         {/* Today Summary Metrics Grid */}
         <View style={styles.sectionHeaderRow}>
           <Text style={styles.sectionTitle}>Today's Metrics</Text>
           <View style={styles.sectionBadge}>
+            <Pulse minScale={1} maxScale={1.5} duration={1200}>
+              <View style={styles.liveDot} />
+            </Pulse>
             <Text style={styles.sectionBadgeText}>LIVE</Text>
           </View>
         </View>
         <View style={styles.metricsGrid}>
-          {METRIC_META.map((m) => (
-            <View key={m.key} style={styles.metricCard}>
-              <View style={[styles.metricIconWrap, { backgroundColor: m.soft }]}>
-                <Text style={styles.metricIcon}>{m.icon}</Text>
-              </View>
-              <Text style={styles.metricLabel}>{m.label}</Text>
-              <Text style={[styles.metricValue, { color: m.accent }]} numberOfLines={1}>
-                {formatMetric(m.key)}
-              </Text>
-              <Text style={styles.metricUnit}>{m.unit}</Text>
-            </View>
-          ))}
+          {METRIC_META.map((m, index) => {
+            const raw = metricValues[m.key] ?? null;
+            const pct = m.goal && raw != null ? Math.min(100, (raw / m.goal) * 100) : null;
+            return (
+              <Reveal key={m.key} delay={220 + index * 90} style={styles.metricCardWrap}>
+                <View style={styles.metricCard}>
+                  <View style={[styles.metricIconWrap, { backgroundColor: m.soft }]}>
+                    <Text style={styles.metricIcon}>{m.icon}</Text>
+                  </View>
+                  <Text style={styles.metricLabel}>{m.label}</Text>
+                  <CountUp
+                    value={raw}
+                    format={METRIC_FORMATTERS[m.key]}
+                    style={[styles.metricValue, { color: m.accent }]}
+                  />
+                  <Text style={styles.metricUnit}>{m.unit}</Text>
+                  {pct != null && <GoalBar pct={pct} color={m.accent} track={C.surfaceAlt} />}
+                  {pct != null && (
+                    <Text style={styles.metricGoal}>
+                      {Math.round(pct)}% of {m.goal?.toLocaleString()} {m.unit}
+                    </Text>
+                  )}
+                </View>
+              </Reveal>
+            );
+          })}
         </View>
-
 
         {/* Action Controls */}
-        <View style={styles.actionRow}>
-          {!permissionInfo?.hasAll && (
-            <TouchableOpacity
-              style={[styles.actionButton, styles.actionPrimary]}
-              onPress={handleRequestPermissions}
-              disabled={loading}
+        <Reveal delay={580}>
+          <View style={styles.actionRow}>
+            {!permissionInfo?.hasAll && (
+              <PressableScale
+                outerStyle={{ flexGrow: 1 }}
+                style={[styles.actionButton, styles.actionPrimary]}
+                onPress={handleRequestPermissions}
+                disabled={loading}
+              >
+                {loading ? (
+                  <ActivityIndicator color="#052E1F" size="small" />
+                ) : (
+                  <>
+                    <Text style={styles.actionIcon}>🔐</Text>
+                    <Text style={styles.actionText}>Grant Access</Text>
+                  </>
+                )}
+              </PressableScale>
+            )}
+
+            <PressableScale
+              outerStyle={{ flexGrow: 1 }}
+              style={[styles.actionButton, styles.actionSync]}
+              onPress={handleRunSync}
+              disabled={syncing || loading}
             >
-              {loading ? (
-                <ActivityIndicator color="#fff" size="small" />
+              {syncing ? (
+                <>
+                  <Spin spinning>
+                    <Text style={styles.actionIcon}>🔄</Text>
+                  </Spin>
+                  <Text style={styles.actionText}>Syncing…</Text>
+                </>
               ) : (
                 <>
-                  <Text style={styles.actionIcon}>🔐</Text>
-                  <Text style={styles.actionText}>Grant Access</Text>
+                  <Text style={styles.actionIcon}>🔄</Text>
+                  <Text style={styles.actionText}>Sync Now</Text>
                 </>
               )}
-            </TouchableOpacity>
-          )}
+            </PressableScale>
 
-          <TouchableOpacity
-            style={[styles.actionButton, styles.actionSync]}
-            onPress={handleRunSync}
-            disabled={syncing || loading}
-          >
-            {syncing ? (
-              <ActivityIndicator color="#fff" size="small" />
-            ) : (
-              <>
-                <Text style={styles.actionIcon}>🔄</Text>
-                <Text style={styles.actionText}>Sync Now</Text>
-              </>
-            )}
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.actionButton, styles.actionSecondary]}
-            onPress={() => setIsModalOpen(true)}
-            disabled={loading}
-          >
-            <Text style={styles.actionIcon}>➕</Text>
-            <Text style={styles.actionSecondaryText}>Log Data</Text>
-          </TouchableOpacity>
-        </View>
+            <PressableScale
+              outerStyle={{ flexGrow: 1 }}
+              style={[styles.actionButton, styles.actionSecondary]}
+              onPress={() => setIsModalOpen(true)}
+              disabled={loading}
+            >
+              <Text style={styles.actionIcon}>➕</Text>
+              <Text style={styles.actionSecondaryText}>Log Data</Text>
+            </PressableScale>
+          </View>
+        </Reveal>
 
         {/* Main Content Navigation Tabs */}
         <View style={styles.tabBar}>
@@ -642,16 +878,12 @@ export default function HealthDashboard() {
               { key: 'sync_console', label: 'Sync Console' },
             ] as { key: TabType; label: string; count?: number }[]
           ).map((tab) => (
-            <TouchableOpacity
+            <TabButton
               key={tab.key}
-              style={[styles.tabItem, activeTab === tab.key && styles.tabItemActive]}
+              active={activeTab === tab.key}
+              label={`${tab.label}${tab.count !== undefined ? ` (${tab.count})` : ''}`}
               onPress={() => setActiveTab(tab.key)}
-            >
-              <Text style={[styles.tabText, activeTab === tab.key && styles.tabTextActive]}>
-                {tab.label}
-                {tab.count !== undefined ? ` (${tab.count})` : ''}
-              </Text>
-            </TouchableOpacity>
+            />
           ))}
         </View>
 
@@ -1164,9 +1396,12 @@ const styles = StyleSheet.create({
     color: C.text,
   },
   sectionBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
     backgroundColor: C.greenSoft,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
     borderRadius: R.pill,
   },
   sectionBadgeText: {
@@ -1184,8 +1419,10 @@ const styles = StyleSheet.create({
     gap: S.sm,
     marginBottom: S.lg,
   },
-  metricCard: {
+  metricCardWrap: {
     width: '47.5%',
+  },
+  metricCard: {
     backgroundColor: C.surface,
     borderWidth: 1,
     borderColor: C.borderSoft,
@@ -1221,6 +1458,28 @@ const styles = StyleSheet.create({
     color: C.textMuted,
     marginTop: 2,
   },
+  metricGoal: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: C.textMuted,
+    marginTop: 5,
+  },
+  barTrack: {
+    height: 5,
+    borderRadius: 3,
+    marginTop: 10,
+    overflow: 'hidden',
+  },
+  barFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  liveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: C.mint,
+  },
 
   /* Action buttons */
   actionRow: {
@@ -1241,6 +1500,11 @@ const styles = StyleSheet.create({
   },
   actionPrimary: {
     backgroundColor: C.primary,
+    shadowColor: C.primary,
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.38,
+    shadowRadius: 14,
+    elevation: 8,
   },
   actionSync: {
     backgroundColor: C.teal + '26',
@@ -1282,9 +1546,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingVertical: 9,
     borderRadius: R.pill,
+    overflow: 'hidden',
   },
-  tabItemActive: {
+  tabPill: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     backgroundColor: C.primary,
+    borderRadius: R.pill,
   },
   tabText: {
     fontSize: 12,

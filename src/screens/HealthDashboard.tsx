@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
+  Easing,
   Modal,
 
-  
   ScrollView,
   StyleSheet,
   Text,
@@ -18,6 +19,7 @@ import {
   SafeAreaProvider,
   SafeAreaInsetsContext,
   useSafeAreaInsets,
+  Pressable as SafePressable,
 } from 'react-native-safe-area-context';
 // Design tokens
 import { palette as C, radius as R, spacing as S } from '../theme';
@@ -64,7 +66,7 @@ const RECORD_META: Record<string, { icon: string; color: string; soft: string }>
   TotalCaloriesBurned: { icon: '🔥', color: C.amber, soft: C.amberSoft },
   Distance: { icon: '📏', color: C.teal, soft: C.tealSoft },
   ExerciseSession: { icon: '🏃', color: C.teal, soft: C.tealSoft },
-  SleepSession: { icon: '😴', color: C.primary, soft: C.primarySoft },
+  SleepSession: { icon: '😴', color: C.violet, soft: C.violetSoft },
   BloodGlucose: { icon: '🩸', color: C.rose, soft: C.roseSoft },
   OxygenSaturation: { icon: '🫁', color: C.sky, soft: C.skySoft },
   BodyTemperature: { icon: '🌡️', color: C.amber, soft: C.amberSoft },
@@ -72,12 +74,31 @@ const RECORD_META: Record<string, { icon: string; color: string; soft: string }>
 const getRecordMeta = (type: string) =>
   RECORD_META[type] || { icon: '📋', color: C.textSecondary, soft: C.surfaceAlt };
 
-const METRIC_META = [
-  { key: 'steps', icon: '🚶', label: 'Steps', accent: C.teal, soft: C.tealSoft, unit: 'count' },
-  { key: 'activeCalories', icon: '🔥', label: 'Calories', accent: C.amber, soft: C.amberSoft, unit: 'kcal' },
-  { key: 'latestWeightKg', icon: '⚖️', label: 'Weight', accent: C.primary, soft: C.primarySoft, unit: 'kg' },
+type MetricKey = 'steps' | 'activeCalories' | 'latestWeightKg' | 'avgHeartRate';
+type MetricMeta = {
+  key: MetricKey;
+  icon: string;
+  label: string;
+  accent: string;
+  soft: string;
+  unit: string;
+  goal?: number;
+};
+
+const METRIC_META: MetricMeta[] = [
+  { key: 'steps', icon: '🚶', label: 'Steps', accent: C.mint, soft: C.primarySoft, unit: 'steps', goal: 10000 },
+  { key: 'activeCalories', icon: '🔥', label: 'Calories', accent: C.amber, soft: C.amberSoft, unit: 'kcal', goal: 500 },
+  { key: 'latestWeightKg', icon: '⚖️', label: 'Weight', accent: C.sky, soft: C.skySoft, unit: 'kg' },
   { key: 'avgHeartRate', icon: '❤️', label: 'Heart Rate', accent: C.rose, soft: C.roseSoft, unit: 'avg bpm' },
-] as const;
+];
+
+/** Stable formatters so the animated count-up numbers don't restart on re-render. */
+const METRIC_FORMATTERS: Record<string, (n: number) => string> = {
+  steps: (n) => Math.round(n).toLocaleString(),
+  activeCalories: (n) => `${Math.round(n)}`,
+  latestWeightKg: (n) => n.toFixed(1),
+  avgHeartRate: (n) => `${Math.round(n)}`,
+};
 
 function getGreeting(): string {
   const h = new Date().getHours();
@@ -356,13 +377,12 @@ export default function HealthDashboard() {
     return true;
   });
 
-  /** Formats metric values for the summary grid. */
-  const formatMetric = (key: string): string => {
-    if (key === 'steps') return todaySummary.steps.toLocaleString();
-    if (key === 'activeCalories') return `${Math.round(todaySummary.activeCalories)}`;
-    if (key === 'latestWeightKg') return todaySummary.latestWeightKg ? todaySummary.latestWeightKg.toFixed(1) : '--';
-    if (key === 'avgHeartRate') return todaySummary.avgHeartRate ? `${Math.round(todaySummary.avgHeartRate)}` : '--';
-    return '--';
+  /** Raw numeric values for the animated summary grid (CountUp handles formatting). */
+  const metricValues: Record<string, number | null> = {
+    steps: todaySummary.steps,
+    activeCalories: todaySummary.activeCalories,
+    latestWeightKg: todaySummary.latestWeightKg,
+    avgHeartRate: todaySummary.avgHeartRate,
   };
 
   /** Payload summary line for a local record. */
@@ -383,46 +403,58 @@ export default function HealthDashboard() {
     <SafeAreaView style={styles.safeArea}>
       <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
         {/* Hero Header */}
-        <View style={styles.hero}>
-          <View style={styles.heroTopRow}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.greeting}>{getGreeting()} 👋</Text>
-              <Text style={styles.heroTitle}>Health Connect</Text>
-              <Text style={styles.heroSubtitle}>
-                {new Date().toLocaleDateString([], {
-                  weekday: 'long',
-                  month: 'long',
-                  day: 'numeric',
-                })}
-              </Text>
-            </View>
-            <View style={styles.heroAvatar}>
-              <Text style={styles.heroAvatarIcon}>🫀</Text>
+        <Reveal>
+          <View style={styles.hero}>
+            <View style={styles.heroTopRow}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.greeting}>{getGreeting()} 👋</Text>
+                <Text style={styles.heroTitle}>Health Connect</Text>
+                <Text style={styles.heroSubtitle}>
+                  {new Date().toLocaleDateString([], {
+                    weekday: 'long',
+                    month: 'long',
+                    day: 'numeric',
+                  })}
+                </Text>
+              </View>
+              <View style={styles.heroAvatar}>
+                <Pulse minScale={1} maxScale={1.16} duration={1400}>
+                  <Text style={styles.heroAvatarIcon}>🫀</Text>
+                </Pulse>
+              </View>
             </View>
           </View>
-        </View>
+        </Reveal>
 
         {/* Status Card */}
-        <View style={styles.statusCard}>
-          <View style={styles.statusItem}>
-            <View style={[styles.statusDot, isHcAvailable ? styles.dotGreen : styles.dotRed]} />
-            <Text style={styles.statusItemText}>SDK {isHcAvailable ? 'Available' : 'Unavailable'}</Text>
+        <Reveal delay={90}>
+          <View style={styles.statusCard}>
+            <View style={styles.statusItem}>
+              {isHcAvailable ? (
+                <Pulse minScale={1} maxScale={1.7} duration={1100}>
+                  <View style={[styles.statusDot, styles.dotGreen]} />
+                </Pulse>
+              ) : (
+                <View style={[styles.statusDot, styles.dotRed]} />
+              )}
+              <Text style={styles.statusItemText}>SDK {isHcAvailable ? 'Available' : 'Unavailable'}</Text>
+            </View>
+            <View style={[styles.statusItem, styles.statusItemBordered]}>
+              <View style={[styles.statusDot, initialized ? styles.dotGreen : styles.dotAmber]} />
+              <Text style={styles.statusItemText}>{initialized ? 'Initialized' : 'Not Initialized'}</Text>
+            </View>
+            <View style={[styles.statusItem, styles.statusItemBordered]}>
+              <View
+                style={[styles.statusDot, permissionInfo?.hasAll ? styles.dotGreen : styles.dotAmber]}
+              />
+              <Text style={styles.statusItemText}>
+                {permissionInfo?.hasAll
+                  ? 'All Permissions'
+                  : `${permissionInfo?.grantedPermissions.length || 0} Permissions`}
+              </Text>
+            </View>
           </View>
-          <View style={[styles.statusItem, styles.statusItemBordered]}>
-            <View style={[styles.statusDot, initialized ? styles.dotGreen : styles.dotAmber]} />
-            <Text style={styles.statusItemText}>{initialized ? 'Initialized' : 'Not Initialized'}</Text>
-          </View>
-          <View style={[styles.statusItem, styles.statusItemBordered]}>
-            <View
-              style={[styles.statusDot, permissionInfo?.hasAll ? styles.dotGreen : styles.dotAmber]}
-            />
-            <Text style={styles.statusItemText}>
-              {permissionInfo?.hasAll
-                ? 'All Permissions'
-                : `${permissionInfo?.grantedPermissions.length || 0} Permissions`}
-            </Text>
-          </View>
-        </View>
+        </Reveal>
 
         {/* Quick Links */}
         <View style={styles.quickLinksRow}>

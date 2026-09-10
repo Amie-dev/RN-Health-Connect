@@ -54,11 +54,13 @@ Do not build application logic around a particular UUID format or value.
 
 ---
 
-# 3.2 Insert Multiple Record Types
+# 3.2 Inserting Multiple Records (Single Record Type Rule)
 
-One advantage of `insertRecords()` is that you can insert different record types in the same request when supported by the wrapper.
+`insertRecords()` accepts an array of records to insert in a single batch call. However, **all records in the array must be of the SAME record type**.
 
-For example:
+If you pass records with different `recordType` values in the same array, `react-native-health-connect` will throw a `HealthConnectError`: `"All records must have the same type"`.
+
+### Batch inserting records of the same type:
 
 ```typescript
 const ids = await insertRecords([
@@ -68,7 +70,30 @@ const ids = await insertRecords([
     startTime: "2026-09-09T08:00:00.000Z",
     endTime: "2026-09-09T09:00:00.000Z",
   },
+  {
+    recordType: "Steps",
+    count: 1500,
+    startTime: "2026-09-09T10:00:00.000Z",
+    endTime: "2026-09-09T10:30:00.000Z",
+  },
+]);
+```
 
+### Inserting multiple different record types:
+
+If you need to log different record types (e.g. `Steps` and `Weight`), issue separate `insertRecords()` calls:
+
+```typescript
+const stepIds = await insertRecords([
+  {
+    recordType: "Steps",
+    count: 3000,
+    startTime: "2026-09-09T08:00:00.000Z",
+    endTime: "2026-09-09T09:00:00.000Z",
+  },
+]);
+
+const weightIds = await insertRecords([
   {
     recordType: "Weight",
     weight: {
@@ -79,8 +104,6 @@ const ids = await insertRecords([
   },
 ]);
 ```
-
-However, your application should only perform writes for record types for which it has the required **write permission**.
 
 ---
 
@@ -544,48 +567,36 @@ If your application needs to identify current device data specifically, use the 
 
 ---
 
-# 3.11 Updating Records
+# 3.11 Updating Records (Upserting via `insertRecords`)
 
-The update operation requires the record's identity.
+In `react-native-health-connect`, there is **no separate `updateRecords()` function**. Updates are performed by calling `insertRecords()` with record objects that include their existing `metadata.id` or `metadata.clientRecordId`.
+
+When Health Connect receives an insert call with an existing record ID, it performs an **upsert** (update if exists, insert if new).
 
 For example:
 
 ```typescript
-import {
-  updateRecords,
-} from "react-native-health-connect";
+import { insertRecords } from "react-native-health-connect";
 
-export async function updateWeightRecord(
-  recordId: string
-) {
+export async function updateWeightRecord(recordId: string) {
   try {
-    await updateRecords([
+    await insertRecords([
       {
         recordType: "Weight",
-
         weight: {
           value: 75.5,
           unit: "kilograms",
         },
-
-        time:
-          "2026-09-09T07:30:00.000Z",
-
+        time: "2026-09-09T07:30:00.000Z",
         metadata: {
           id: recordId,
         },
       },
     ]);
 
-    console.log(
-      "Weight updated successfully"
-    );
+    console.log("Weight updated successfully via insertRecords");
   } catch (error) {
-    console.error(
-      "Failed to update weight:",
-      error
-    );
-
+    console.error("Failed to update weight:", error);
     throw error;
   }
 }
@@ -660,51 +671,40 @@ We'll use this concept later in the synchronization chapter.
 
 ---
 
-# 3.13 Deleting Records by ID
+# 3.13 Deleting Records by UUIDs (`deleteRecordsByUuids`)
 
-You can delete specific records when you know their Health Connect IDs.
+You can delete specific records when you know their Health Connect UUIDs or client record IDs using `deleteRecordsByUuids()`.
 
 For example:
 
 ```typescript
-import {
-  deleteRecordsByIds,
-} from "react-native-health-connect";
+import { deleteRecordsByUuids } from "react-native-health-connect";
 
 export async function removeStepRecords(
-  recordIds: string[]
+  recordIds: string[],
+  clientRecordIds: string[] = []
 ) {
   try {
-    await deleteRecordsByIds(
+    await deleteRecordsByUuids(
       "Steps",
       recordIds,
-      []
+      clientRecordIds
     );
 
-    console.log(
-      "Records deleted:",
-      recordIds
-    );
+    console.log("Records deleted successfully");
   } catch (error) {
-    console.error(
-      "Failed to delete records:",
-      error
-    );
-
+    console.error("Failed to delete records:", error);
     throw error;
   }
 }
 ```
 
-The record type is important:
+The parameters for `deleteRecordsByUuids` are:
+1. `recordType`: e.g. `"Steps"`
+2. `recordIdsList`: Array of Health Connect UUID strings (`string[]`)
+3. `clientRecordIdsList`: Array of application client record ID strings (`string[]`)
 
-```text
-"Steps"
-```
-
-must correspond to the IDs being deleted.
-
-Don't mix unrelated record types into a deletion operation expecting Health Connect to infer their types.
+The record type is important: `"Steps"` must correspond to the IDs being deleted. Don't mix unrelated record types into a deletion operation.
 
 ---
 
@@ -794,17 +794,11 @@ At this point your Health Connect CRUD layer looks like:
           ┌───────────────┼───────────────┐
           │               │               │
           ▼               ▼               ▼
-       CREATE           READ            DELETE
+     CREATE/UPDATE      READ            DELETE
           │               │               │
           ▼               ▼               ▼
- insertRecords()     readRecord()   deleteRecordsByIds()
-                     readRecords()  deleteRecordsByTimeRange()
-          │
-          ▼
-       UPDATE
-          │
-          ▼
-   updateRecords()
+  insertRecords()    readRecord()   deleteRecordsByUuids()
+  (upserts with ID)  readRecords()  deleteRecordsByTimeRange()
 ```
 
 ---

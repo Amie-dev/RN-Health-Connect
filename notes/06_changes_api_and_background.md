@@ -123,29 +123,24 @@ If several independent data types share one token request, that permission chang
 
 ---
 
-# 6.3 React Native Changes Token
+# 6.3 React Native Changes Token (`getChanges`)
 
-If the installed version of your React Native Health Connect wrapper exposes `getChangesToken`, the application can create a token for a record type.
-
-A wrapper-level API may look like:
+In `react-native-health-connect`, initial changes tokens are obtained by calling `getChanges()` with `recordTypes` (without passing a `changesToken`). The function returns `nextChangesToken` which represents your starting point for synchronization.
 
 ```typescript
-import {
-  getChangesToken,
-} from 'react-native-health-connect';
+import { getChanges } from 'react-native-health-connect';
 
 export async function createStepsChangesToken(): Promise<string> {
-  const token = await getChangesToken({
+  const result = await getChanges({
     recordTypes: ['Steps'],
   });
 
-  return token;
+  // Store result.nextChangesToken for subsequent sync passes
+  return result.nextChangesToken;
 }
 ```
 
-Store the token persistently.
-
-For example:
+Store the token persistently in local storage (e.g. AsyncStorage or SQLite):
 
 ```typescript
 type SyncState = {
@@ -155,7 +150,7 @@ type SyncState = {
 };
 ```
 
-Example local storage:
+Example local storage state:
 
 ```text
 health_sync_state
@@ -167,41 +162,43 @@ HeartRate        eyJ...              2026-09-09T...
 Weight           eyJ...              2026-09-09T...
 ```
 
-### Important
-
-The exact JavaScript signature depends on the version of `react-native-health-connect` being used.
-
-Therefore, your production code should be written against the installed wrapper version rather than assuming that the JavaScript API is identical to the native Kotlin API.
-
 ---
 
 # 6.4 Requesting Changes
 
-Once a token exists:
+Once a changes token exists, pass it to `getChanges()`:
 
 ```typescript
-const response = await getChanges(changesToken);
+const response = await getChanges({
+  changesToken: storedChangesToken,
+});
 ```
 
-Conceptually, Health Connect returns:
+`react-native-health-connect` returns a `GetChangesResults` object containing:
 
 ```typescript
 {
-  changes: [...],
+  upsertionChanges: [
+    { record: { ... } }
+  ],
+  deletionChanges: [
+    { recordId: "..." }
+  ],
   nextChangesToken: "...",
   hasMore: false,
   changesTokenExpired: false
 }
 ```
 
-The important fields are:
+The key properties in `GetChangesResults` are:
 
 | Field                 | Meaning                                              |
 | --------------------- | ---------------------------------------------------- |
-| `changes`             | Changes since the supplied token                     |
+| `upsertionChanges`    | Inserted or updated record objects                   |
+| `deletionChanges`     | Array of deleted record ID objects (`{ recordId }`)   |
 | `nextChangesToken`    | Token representing the next synchronization position |
-| `hasMore`             | More changes are available                           |
-| `changesTokenExpired` | The supplied token is no longer valid                |
+| `hasMore`             | `true` if additional changes exist in the backlog    |
+| `changesTokenExpired` | `true` if the token has expired (must re-sync all)   |
 
 The native API explicitly documents `hasMore` as indicating that the returned response may not contain every available change. ([Android Developers][3])
 

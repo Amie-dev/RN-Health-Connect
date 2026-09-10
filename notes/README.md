@@ -22,11 +22,11 @@ This guide covers everything from environment setup, permission lifecycle, CRUD 
    - Navigating users to Health Connect system settings
 
 3. [Chapter 3: CRUD Operations & Data Querying](./03_crud_operations.md)
-   - Inserting single & multiple records (`insertRecords`)
+   - Inserting records (`insertRecords`)
    - Reading single record by ID (`readRecord`)
    - Reading bulk records with time range filters & pagination (`readRecords`)
-   - Updating existing records (`updateRecords`)
-   - Deleting records by ID or time range (`deleteRecordsByIds`, `deleteRecordsByTimeRange`)
+   - Updating existing records via upsert (`insertRecords`)
+   - Deleting records by UUIDs or time range (`deleteRecordsByUuids`, `deleteRecordsByTimeRange`)
 
 4. [Chapter 4: Complete Record Types & Return Data Schemas](./04_all_record_types_and_data_schemas.md)
    - Record Metadata structure (`id`, `clientRecordId`, `dataOrigin`, `recordingMethod`, `device`, `lastModifiedTime`)
@@ -46,7 +46,7 @@ This guide covers everything from environment setup, permission lifecycle, CRUD 
 
 6. [Chapter 6: Changes API & Data Synchronization](./06_changes_api_and_background.md)
    - Synchronizing external databases with Health Connect
-   - Requesting and managing Changes Tokens (`getChangesToken`)
+   - Requesting and managing Changes Tokens (`getChanges`)
    - Reading changes (`getChanges` - inserted & deleted record IDs)
    - Handling background read permissions and restrictions
 

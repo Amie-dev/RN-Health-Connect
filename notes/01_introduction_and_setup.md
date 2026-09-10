@@ -78,9 +78,9 @@ Health Connect native SDK
 
 ---
 
-## 1.4 Expo Integration Setup (`app.json`)
+## 1.4 Expo Integration & Permission Setup (`app.json`)
 
-For an Expo project, add the plugin to `app.json`:
+For an Expo managed/prebuild project, permissions and plugins are configured inside `app.json`:
 
 ```json
 {
@@ -90,60 +90,110 @@ For an Expo project, add the plugin to `app.json`:
     "version": "1.0.0",
     "platforms": ["android"],
     "plugins": [
+      "react-native-health-connect",
       [
-        "react-native-health-connect",
+        "expo-build-properties",
         {
-          "rationaleActivity": "com.mycompany.myhealthapp.PermissionsRationaleActivity"
+          "android": {
+            "minSdkVersion": 26
+          }
         }
       ]
     ],
     "android": {
-      "package": "com.mycompany.myhealthapp"
+      "package": "com.mycompany.myhealthapp",
+      "permissions": [
+        "android.permission.health.READ_STEPS",
+        "android.permission.health.WRITE_STEPS",
+        "android.permission.health.READ_HEART_RATE",
+        "android.permission.health.WRITE_HEART_RATE",
+        "android.permission.health.READ_WEIGHT",
+        "android.permission.health.WRITE_WEIGHT",
+        "android.permission.health.READ_ACTIVE_CALORIES_BURNED",
+        "android.permission.health.READ_SLEEP"
+      ]
     }
   }
 }
 ```
 
+### Key Expo Configuration Details:
+
+1. **`plugins`**:
+   - `"react-native-health-connect"`: Auto-injects required rationale intent filters into `MainActivity` (Android 13 & below) and generates the `ViewPermissionUsageActivity` alias (Android 14+).
+   - `"expo-build-properties"`: Ensures `minSdkVersion` is set to **26** (Android 8.0+), which is required by Health Connect.
+
+2. **`android.permissions`**:
+   - Explicitly list the Health Connect permission strings (`android.permission.health.*`) required by your application.
+   - When running `npx expo prebuild`, Expo automatically injects these permissions into `android/app/src/main/AndroidManifest.xml`.
+
 Then generate the native Android project and build:
 
 ```bash
-# Generate native code
+# Generate native Android code from app.json configuration
 npx expo prebuild
 
-# Build development version
+# Build and run on Android emulator or connected device
 npx expo run:android
 
-# Or build via EAS
+# Or generate a development build via EAS
 eas build --profile development --platform android
 ```
 
-> **Important:** Whenever native configuration in `app.json` changes, you must regenerate and rebuild the Android application (`npx expo prebuild`).
+> **Important:** Whenever native permissions or plugin configurations in `app.json` change, you must re-run `npx expo prebuild` to regenerate the Android configuration.
 
 ---
 
-## 1.5 Health Connect Permissions
+## 1.5 Handling Runtime Permissions in Expo / React Native
 
-Health Connect permissions are declared using standard Android permission strings inside `AndroidManifest.xml`:
+Declaring permissions in `app.json` allows Android to register them, but you must also request **runtime permission** from the user in your React Native code.
 
-```xml
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+### Runtime Permission Flow:
 
-    <uses-permission android:name="android.permission.health.READ_STEPS" />
-    <uses-permission android:name="android.permission.health.WRITE_STEPS" />
-    <uses-permission android:name="android.permission.health.READ_HEART_RATE" />
-    <uses-permission android:name="android.permission.health.WRITE_HEART_RATE" />
-    <uses-permission android:name="android.permission.health.READ_WEIGHT" />
-    <uses-permission android:name="android.permission.health.WRITE_WEIGHT" />
+```typescript
+import {
+  requestPermission,
+  getGrantedPermissions,
+  Permission,
+} from "react-native-health-connect";
 
-</manifest>
-```
+// 1. Define the permissions your app needs
+const REQUIRED_PERMISSIONS: Permission[] = [
+  { accessType: "read", recordType: "Steps" },
+  { accessType: "write", recordType: "Steps" },
+  { accessType: "read", recordType: "HeartRate" },
+  { accessType: "read", recordType: "Weight" },
+  { accessType: "write", recordType: "Weight" },
+];
 
-### Permission Best Practices
+// 2. Function to request missing permissions
+export async function handleHealthPermissions(): Promise<boolean> {
+  try {
+    // Check currently granted permissions
+    const grantedPermissions = await getGrantedPermissions();
 
-Request only the specific health permissions your feature actually uses. Google Play Console requires declared permissions to match the access information submitted in your Play Console declarations.
+    // Determine if all required permissions are already granted
+    const hasAllPermissions = REQUIRED_PERMISSIONS.every((req) =>
+      grantedPermissions.some(
+        (g) => g.recordType === req.recordType && g.accessType === req.accessType
+      )
+    );
 
-```text
-App Feature → Required Health Data → Specific Permission → User Access Prompt
+    if (hasAllPermissions) {
+      console.log("All required permissions already granted.");
+      return true;
+    }
+
+    // Request missing permissions from user
+    const newlyGranted = await requestPermission(REQUIRED_PERMISSIONS);
+    console.log("Granted permissions after request:", newlyGranted);
+
+    return newlyGranted.length > 0;
+  } catch (error) {
+    console.error("Error handling Health Connect permissions:", error);
+    return false;
+  }
+}
 ```
 
 ---

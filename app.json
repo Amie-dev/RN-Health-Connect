@@ -15,7 +15,30 @@
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0A0F1D"
       },
-      "package": "com.healthconnect.app"
+      "package": "com.healthconnect.app",
+      "permissions": [
+        "android.permission.health.READ_STEPS",
+        "android.permission.health.WRITE_STEPS",
+        "android.permission.health.READ_ACTIVE_CALORIES_BURNED",
+        "android.permission.health.READ_TOTAL_CALORIES_BURNED",
+        "android.permission.health.READ_DISTANCE",
+        "android.permission.health.READ_EXERCISE",
+        "android.permission.health.READ_WEIGHT",
+        "android.permission.health.WRITE_WEIGHT",
+        "android.permission.health.READ_HEIGHT",
+        "android.permission.health.READ_BODY_FAT",
+        "android.permission.health.READ_HEART_RATE",
+        "android.permission.health.WRITE_HEART_RATE",
+        "android.permission.health.READ_BLOOD_PRESSURE",
+        "android.permission.health.WRITE_BLOOD_PRESSURE",
+        "android.permission.health.READ_BLOOD_GLUCOSE",
+        "android.permission.health.READ_OXYGEN_SATURATION",
+        "android.permission.health.READ_BODY_TEMPERATURE",
+        "android.permission.health.READ_SLEEP",
+        "android.permission.health.READ_HYDRATION",
+        "android.permission.health.WRITE_HYDRATION",
+        "android.permission.health.READ_NUTRITION"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"

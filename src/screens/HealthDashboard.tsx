@@ -260,26 +260,31 @@ function CountUp({
   duration?: number;
   style?: any;
 }) {
-  const [text, setText] = useState(() => (value == null ? '--' : format(value)));
+  const isInvalid = value == null || typeof value !== 'number' || isNaN(value);
+  const [text, setText] = useState(() => (isInvalid ? '--' : format(value!)));
   const anim = useRef(new Animated.Value(1)).current;
-  const prevRef = useRef<number | null>(value);
+  const prevRef = useRef<number | null>(isInvalid ? null : value);
 
   useEffect(() => {
-    if (value == null) {
+    if (value == null || typeof value !== 'number' || isNaN(value)) {
       prevRef.current = null;
       setText('--');
       return;
     }
-    const from = prevRef.current ?? 0;
+    const from =
+      prevRef.current != null && typeof prevRef.current === 'number' && !isNaN(prevRef.current)
+        ? prevRef.current
+        : 0;
     prevRef.current = value;
     if (from === value) {
       setText(format(value));
       return;
     }
     anim.setValue(0);
-    const listenerId = anim.addListener(({ value: t }) =>
-      setText(format(from + (value - from) * t))
-    );
+    const listenerId = anim.addListener(({ value: t }) => {
+      const current = from + (value - from) * t;
+      setText(isNaN(current) ? '--' : format(current));
+    });
     const timer = Animated.timing(anim, {
       toValue: 1,
       duration,
@@ -700,7 +705,11 @@ export default function HealthDashboard() {
     if (item.recordType === 'BloodPressure')
       return `${item.payload.systolic?.inMillimetersOfMercury ?? item.payload.systolic?.value ?? '--'} / ${item.payload.diastolic?.inMillimetersOfMercury ?? item.payload.diastolic?.value ?? '--'} mmHg`;
     if (item.recordType === 'Hydration') return `${item.payload.volume?.inLiters ?? item.payload.volume?.value ?? '--'} L`;
-    if (item.recordType === 'ActiveCaloriesBurned') return `${item.payload.energy?.inKilocalories ?? item.payload.energy?.value ?? '--'} kcal`;
+    if (item.recordType === 'ActiveCaloriesBurned' || item.recordType === 'TotalCaloriesBurned') {
+      const energy = item.payload.energy;
+      const kcal = typeof energy === 'object' ? (energy?.inKilocalories ?? energy?.inCalories ?? energy?.value) : energy;
+      return `${kcal != null && !isNaN(Number(kcal)) ? Math.round(Number(kcal)) : '--'} kcal`;
+    }
     if (item.recordType === 'Distance') return `${item.payload.distance?.inKilometers ?? item.payload.distance?.value ?? '--'} km`;
     if (item.recordType === 'SleepSession') return `Title: ${item.payload.title || 'Sleep Session'}`;
     return JSON.stringify(item.payload).substring(0, 45);
@@ -713,7 +722,11 @@ export default function HealthDashboard() {
     if (type === 'BloodPressure')
       return `BP: ${rec.systolic?.inMillimetersOfMercury ?? '--'} / ${rec.diastolic?.inMillimetersOfMercury ?? '--'} mmHg`;
     if (type === 'Hydration') return `Volume: ${rec.volume?.inLiters ?? rec.volume?.value ?? '--'} L`;
-    if (type === 'ActiveCaloriesBurned') return `Energy: ${rec.energy?.inKilocalories ?? rec.energy?.value ?? '--'} kcal`;
+    if (type === 'ActiveCaloriesBurned' || type === 'TotalCaloriesBurned') {
+      const energy = rec.energy;
+      const kcal = typeof energy === 'object' ? (energy?.inKilocalories ?? energy?.inCalories ?? energy?.value) : energy;
+      return `Energy: ${kcal != null && !isNaN(Number(kcal)) ? Math.round(Number(kcal)) : '--'} kcal`;
+    }
     if (type === 'SleepSession') return `Title: ${rec.title || 'Sleep Session'}`;
     return JSON.stringify(rec).substring(0, 45);
   };

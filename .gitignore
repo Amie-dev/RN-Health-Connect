@@ -6,7 +6,7 @@ node_modules/
 .expo-shared/
 .expo-dev-client/
 expo-debug.log*
-
+dist
 # Metro bundler cache
 .metro-health-check*
 
@@ -39,3 +39,4 @@ pnpm-debug.log*
 
 # EAS / local cache
 .eas/
+dist/metadata.json

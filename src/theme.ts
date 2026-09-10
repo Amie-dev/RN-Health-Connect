@@ -4,24 +4,27 @@
  */
 
 export const palette = {
-  // Backgrounds
-  bg: '#0B1020',
-  surface: '#151B2E',
-  surfaceAlt: '#1B2338',
-  surfaceDeep: '#0A0F1E',
-  border: '#232C45',
-  borderSoft: '#1B2338',
+  // Backgrounds — deep "midnight pine" surfaces with a cool green undertone
+  bg: '#0A0F1D',
+  surface: '#0F1A2E',
+  surfaceAlt: '#182338',
+  surfaceDeep: '#070C18',
+  border: '#223049',
+  borderSoft: '#182238',
 
   // Text
   text: '#F1F5F9',
   textSecondary: '#94A3B8',
   textMuted: '#64748B',
 
-  // Accents
-  primary: '#6366F1',
-  primarySoft: 'rgba(99, 102, 241, 0.16)',
+  // Accents — vitality emerald as the brand primary (replaces generic indigo)
+  primary: '#10B981',
+  primarySoft: 'rgba(16, 185, 129, 0.15)',
+  mint: '#6EE7B7',
   teal: '#2DD4BF',
   tealSoft: 'rgba(45, 212, 191, 0.16)',
+  violet: '#A78BFA',
+  violetSoft: 'rgba(167, 139, 250, 0.16)',
   amber: '#FBBF24',
   amberSoft: 'rgba(251, 191, 36, 0.16)',
   rose: '#FB7185',

@@ -421,6 +421,7 @@ export default function HealthDashboard() {
   const [activeTab, setActiveTab] = useState<TabType>('explorer');
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('ALL');
   const [expandedRecordId, setExpandedRecordId] = useState<string | null>(null);
+  const [selectedLiveRecordType, setSelectedLiveRecordType] = useState<RecordType>('Steps');
 
   // Local DB & Sync Console data
   const [localRecords, setLocalRecords] = useState<LocalHealthRecord[]>([]);
@@ -433,6 +434,54 @@ export default function HealthDashboard() {
   const [inputVal1, setInputVal1] = useState('');
   const [inputVal2, setInputVal2] = useState('');
 
+  /**
+   * Refreshes summary metrics, local DB records, and sync console states
+   */
+  const refreshAllData = useCallback(async (liveType: RecordType = selectedLiveRecordType) => {
+    try {
+      // 1. Fetch Today Summary Aggregations
+      const summary = await getTodayHealthSummary();
+
+      // Fetch latest weight from past 30 days
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const weightRes = await queryHealthRecords('Weight', {
+        timeRangeFilter: {
+          operator: 'between',
+          startTime: thirtyDaysAgo,
+          endTime: new Date().toISOString(),
+        },
+        pageSize: 1,
+        ascendingOrder: false,
+      });
+      const latestWeight = weightRes.records[0]?.weight?.inKilograms ?? weightRes.records[0]?.weight?.value ?? null;
+
+      setTodaySummary((prev) => ({
+        ...summary,
+        latestWeightKg: latestWeight ?? prev.latestWeightKg,
+      }));
+
+      // 2. Load Local Database Records
+      const dbRecords = await getAllLocalHealthRecords();
+      setLocalRecords(dbRecords);
+
+      // 3. Load Sync Console States
+      const states = await getAllSyncStates();
+      setSyncStates(states);
+
+      // 4. Fetch Live Records sample for selected record type
+      const liveRes = await queryHealthRecords(liveType, {
+        timeRangeFilter: {
+          operator: 'between',
+          startTime: thirtyDaysAgo,
+          endTime: new Date().toISOString(),
+        },
+        pageSize: 50,
+      });
+      setLiveHCRecords(liveRes.records || []);
+    } catch (err: any) {
+      console.error('[Dashboard] Refresh error:', err);
+    }
+  }, [selectedLiveRecordType]);
 
   /**
    * Initializes SDK & checks permissions
@@ -455,6 +504,7 @@ export default function HealthDashboard() {
       setPermissionInfo(permStatus);
 
       if (permStatus.grantedPermissions.length > 0) {
+        await SyncManager.syncAll(DEFAULT_SYNC_RECORD_TYPES);
         await refreshAllData();
       }
     } catch (err: any) {
@@ -463,57 +513,7 @@ export default function HealthDashboard() {
     } finally {
       setLoading(false);
     }
-  }, []);
-
-  /**
-   * Refreshes summary metrics, local DB records, and sync console states
-   */
-  const refreshAllData = useCallback(async () => {
-    try {
-      // 1. Fetch Today Summary Aggregations
-      const summary = await getTodayHealthSummary();
-
-      // Fetch latest weight from past 30 days
-      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-      const weightRes = await queryHealthRecords('Weight', {
-        timeRangeFilter: {
-          operator: 'between',
-          startTime: thirtyDaysAgo,
-          endTime: new Date().toISOString(),
-        },
-        pageSize: 1,
-        ascendingOrder: false,
-      });
-      const latestWeight = weightRes.records[0]?.weight?.inKilograms ?? null;
-
-      setTodaySummary({
-        ...summary,
-        latestWeightKg: latestWeight,
-      });
-
-      // 2. Load Local Database Records
-      const dbRecords = await getAllLocalHealthRecords();
-      setLocalRecords(dbRecords);
-
-      // 3. Load Sync Console States
-      const states = await getAllSyncStates();
-      setSyncStates(states);
-
-      // 4. Fetch Live Records sample
-      const liveRes = await queryHealthRecords('Steps', {
-        timeRangeFilter: {
-          operator: 'between',
-          startTime: thirtyDaysAgo,
-          endTime: new Date().toISOString(),
-        },
-        pageSize: 20,
-      });
-      setLiveHCRecords(liveRes.records);
-    } catch (err: any) {
-      console.error('[Dashboard] Refresh error:', err);
-    }
-  }, []);
-
+  }, [refreshAllData]);
 
   /**
    * Trigger Manual Permission Request
@@ -525,6 +525,7 @@ export default function HealthDashboard() {
       const permStatus = await checkHealthPermissions();
       setPermissionInfo(permStatus);
       if (permStatus.grantedPermissions.length > 0) {
+        await SyncManager.syncAll(DEFAULT_SYNC_RECORD_TYPES);
         await refreshAllData();
       }
     } catch (err: any) {
@@ -693,13 +694,28 @@ export default function HealthDashboard() {
 
   /** Payload summary line for a local record. */
   const payloadSummaryText = (item: LocalHealthRecord): string => {
-    if (item.recordType === 'Steps') return `Count: ${item.payload.count}`;
-    if (item.recordType === 'Weight') return `${item.payload.weight?.inKilograms ?? '--'} kg`;
-    if (item.recordType === 'HeartRate') return `${item.payload.samples?.[0]?.beatsPerMinute ?? '--'} bpm`;
+    if (item.recordType === 'Steps') return `Count: ${item.payload.count ?? item.payload.records?.[0]?.count ?? '--'}`;
+    if (item.recordType === 'Weight') return `${item.payload.weight?.inKilograms ?? item.payload.weight?.value ?? '--'} kg`;
+    if (item.recordType === 'HeartRate') return `${item.payload.samples?.[0]?.beatsPerMinute ?? item.payload.beatsPerMinute ?? '--'} bpm`;
     if (item.recordType === 'BloodPressure')
-      return `${item.payload.systolic?.inMillimetersOfMercury ?? '--'} / ${item.payload.diastolic?.inMillimetersOfMercury ?? '--'} mmHg`;
-    if (item.recordType === 'Hydration') return `${item.payload.volume?.inLiters ?? '--'} L`;
-    return '';
+      return `${item.payload.systolic?.inMillimetersOfMercury ?? item.payload.systolic?.value ?? '--'} / ${item.payload.diastolic?.inMillimetersOfMercury ?? item.payload.diastolic?.value ?? '--'} mmHg`;
+    if (item.recordType === 'Hydration') return `${item.payload.volume?.inLiters ?? item.payload.volume?.value ?? '--'} L`;
+    if (item.recordType === 'ActiveCaloriesBurned') return `${item.payload.energy?.inKilocalories ?? item.payload.energy?.value ?? '--'} kcal`;
+    if (item.recordType === 'Distance') return `${item.payload.distance?.inKilometers ?? item.payload.distance?.value ?? '--'} km`;
+    if (item.recordType === 'SleepSession') return `Title: ${item.payload.title || 'Sleep Session'}`;
+    return JSON.stringify(item.payload).substring(0, 45);
+  };
+
+  const formatLiveRecordSummary = (rec: any, type: string): string => {
+    if (type === 'Steps') return `Count: ${rec.count ?? '--'}`;
+    if (type === 'Weight') return `Weight: ${rec.weight?.inKilograms ?? rec.weight?.value ?? '--'} kg`;
+    if (type === 'HeartRate') return `BPM: ${rec.samples?.[0]?.beatsPerMinute ?? rec.beatsPerMinute ?? '--'}`;
+    if (type === 'BloodPressure')
+      return `BP: ${rec.systolic?.inMillimetersOfMercury ?? '--'} / ${rec.diastolic?.inMillimetersOfMercury ?? '--'} mmHg`;
+    if (type === 'Hydration') return `Volume: ${rec.volume?.inLiters ?? rec.volume?.value ?? '--'} L`;
+    if (type === 'ActiveCaloriesBurned') return `Energy: ${rec.energy?.inKilocalories ?? rec.energy?.value ?? '--'} kcal`;
+    if (type === 'SleepSession') return `Title: ${rec.title || 'Sleep Session'}`;
+    return JSON.stringify(rec).substring(0, 45);
   };
 
   const isHcAvailable = sdkStatus === SdkAvailabilityStatus.SDK_AVAILABLE;
@@ -998,47 +1014,84 @@ export default function HealthDashboard() {
         {/* TAB 2: Direct Live HC Query */}
         {activeTab === 'live' && (
           <View style={styles.tabContent}>
+            {/* Live Record Type Chips */}
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterBar}>
+              {(['Steps', 'Weight', 'HeartRate', 'BloodPressure', 'Hydration', 'ActiveCaloriesBurned', 'SleepSession'] as RecordType[]).map(
+                (recType) => {
+                  const active = selectedLiveRecordType === recType;
+                  return (
+                    <TouchableOpacity
+                      key={recType}
+                      style={[styles.chip, active && styles.chipActive]}
+                      onPress={() => {
+                        setSelectedLiveRecordType(recType);
+                        refreshAllData(recType);
+                      }}
+                    >
+                      <Text style={[styles.chipText, active && styles.chipTextActive]}>
+                        {getRecordMeta(recType).icon} {recType}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                }
+              )}
+            </ScrollView>
+
             <View style={styles.explorerHeaderRow}>
               <Text style={styles.explorerTitle}>
-                Live Read — Steps <Text style={styles.explorerCount}>{liveHCRecords.length}</Text>
+                Live Read — {selectedLiveRecordType}{' '}
+                <Text style={styles.explorerCount}>{liveHCRecords.length}</Text>
               </Text>
-              <View style={[styles.recordTag, { backgroundColor: C.tealSoft }]}>
-                <Text style={[styles.recordTagText, { color: C.teal }]}>Last 30 Days</Text>
+              <View style={[styles.recordTag, { backgroundColor: getRecordMeta(selectedLiveRecordType).soft }]}>
+                <Text style={[styles.recordTagText, { color: getRecordMeta(selectedLiveRecordType).color }]}>
+                  Last 30 Days
+                </Text>
               </View>
             </View>
 
             {liveHCRecords.length === 0 ? (
               <View style={styles.emptyState}>
                 <Text style={styles.emptyIcon}>📡</Text>
-                <Text style={styles.emptyTitle}>No live data retrieved</Text>
+                <Text style={styles.emptyTitle}>No live {selectedLiveRecordType} records found</Text>
                 <Text style={styles.emptySubText}>
-                  Grant permissions and run a sync to read records directly from Health Connect.
+                  Grant permissions or use "Log Data" above to add new health entries.
                 </Text>
               </View>
             ) : (
-              liveHCRecords.map((rec: any, idx: number) => (
-                <View key={rec.metadata?.id || idx} style={styles.recordCard}>
-                  <View style={styles.recordTopRow}>
-                    <View style={[styles.recordIconWrap, { backgroundColor: C.tealSoft }]}>
-                      <Text style={styles.recordIcon}>🚶</Text>
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.recordHeader}>
-                        <Text style={[styles.recordType, { color: C.teal }]}>Live Steps Record</Text>
-                        <Text style={styles.recordTime}>
-                          {new Date(rec.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                          {' → '}
-                          {new Date(rec.endTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              liveHCRecords.map((rec: any, idx: number) => {
+                const meta = getRecordMeta(selectedLiveRecordType);
+                const recordTime = rec.startTime || rec.time;
+                return (
+                  <View key={rec.metadata?.id || idx} style={styles.recordCard}>
+                    <View style={styles.recordTopRow}>
+                      <View style={[styles.recordIconWrap, { backgroundColor: meta.soft }]}>
+                        <Text style={styles.recordIcon}>{meta.icon}</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <View style={styles.recordHeader}>
+                          <Text style={[styles.recordType, { color: meta.color }]}>
+                            {selectedLiveRecordType}
+                          </Text>
+                          {recordTime && (
+                            <Text style={styles.recordTime}>
+                              {new Date(recordTime).toLocaleTimeString([], {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })}
+                            </Text>
+                          )}
+                        </View>
+                        <Text style={styles.payloadSummary}>
+                          {formatLiveRecordSummary(rec, selectedLiveRecordType)}
+                        </Text>
+                        <Text style={styles.recordHcId} numberOfLines={1}>
+                          ID: {rec.metadata?.id}
                         </Text>
                       </View>
-                      <Text style={styles.payloadSummary}>Count: {rec.count}</Text>
-                      <Text style={styles.recordHcId} numberOfLines={1}>
-                        ID: {rec.metadata?.id}
-                      </Text>
                     </View>
                   </View>
-                </View>
-              ))
+                );
+              })
             )}
           </View>
         )}
@@ -1140,14 +1193,14 @@ export default function HealthDashboard() {
                     ) : (
                       <TouchableOpacity
                         style={styles.smallButton}
-                        onPress={() => SyncManager.syncRecordType(type).then(refreshAllData)}
+                        onPress={() => SyncManager.syncRecordType(type).then(() => refreshAllData())}
                       >
                         <Text style={styles.smallButtonText}>Sync Type</Text>
                       </TouchableOpacity>
                     )}
                     <TouchableOpacity
                       style={styles.smallOutlineButton}
-                      onPress={() => resetSyncState(type).then(refreshAllData)}
+                      onPress={() => resetSyncState(type).then(() => refreshAllData())}
                     >
                       <Text style={styles.smallOutlineText}>Reset State</Text>
                     </TouchableOpacity>

@@ -1,10 +1,12 @@
 import { AppState, AppStateStatus } from 'react-native';
 import { RecordType, getGrantedPermissions } from 'react-native-health-connect';
 import { fetchChangesToken, fetchChanges } from '../changes';
+import { queryHealthRecords } from '../records';
 import { ChangeProcessor } from './changeProcessor';
 import { SyncRecovery } from './recovery';
 import { TokenStore } from './tokenStore';
 import { getSyncState, updateSyncState, getAllSyncStates } from '../../database/syncState';
+import { upsertLocalHealthRecord } from '../../database/healthRecords';
 
 export const DEFAULT_SYNC_RECORD_TYPES: RecordType[] = [
   'Steps',
@@ -59,19 +61,46 @@ export class SyncManager {
 
       let token = await TokenStore.getToken(recordType);
 
-      // If no token exists, initialize by requesting a fresh token
+      // If no token exists, initialize by backfilling existing records and requesting a fresh token
       if (!token) {
-        console.log(`[SyncManager] Initializing new token for ${recordType}`);
+        console.log(`[SyncManager] Initializing token & backfilling historical data for ${recordType}`);
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        const now = new Date().toISOString();
+
+        let backfilledCount = 0;
+        try {
+          const initialRecordsRes = await queryHealthRecords(recordType, {
+            timeRangeFilter: {
+              operator: 'between',
+              startTime: thirtyDaysAgo,
+              endTime: now,
+            },
+            pageSize: 1000,
+          });
+
+          for (const rec of initialRecordsRes.records) {
+            const hcId = rec.metadata?.id;
+            if (hcId) {
+              await upsertLocalHealthRecord(hcId, recordType, rec);
+              backfilledCount++;
+            }
+          }
+        } catch (queryErr) {
+          console.warn(`[SyncManager] Initial query backfill error for ${recordType}:`, queryErr);
+        }
+
         token = await fetchChangesToken([recordType]);
+        const nowIso = new Date().toISOString();
         await updateSyncState(recordType, {
           changesToken: token,
-          lastSuccessfulSyncAt: new Date().toISOString(),
+          lastSuccessfulSyncAt: nowIso,
           status: 'idle',
+          updatedAt: nowIso,
         });
         return {
           recordType,
           success: true,
-          upsertedCount: 0,
+          upsertedCount: backfilledCount,
           deletedCount: 0,
           tokenExpired: false,
         };

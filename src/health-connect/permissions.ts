@@ -95,6 +95,35 @@ export async function checkHealthPermissions(
   }
 }
 
+
+/**
+ * Helper to check if a specific record type and access type permission is granted.
+ */
+export function isPermissionGranted(
+  grantedPermissions: any[],
+  recordType: string,
+  accessType: 'read' | 'write' = 'read'
+): boolean {
+  if (!Array.isArray(grantedPermissions)) return false;
+  return grantedPermissions.some(
+    (p: any) => p.recordType === recordType && p.accessType === accessType
+  );
+}
+
+/**
+ * Requests permissions specifically for a single record type (read and/or write).
+ */
+export async function requestPermissionsForRecord(
+  recordType: string,
+  accessTypes: ('read' | 'write')[] = ['read', 'write']
+): Promise<any[]> {
+  const permissionsToRequest: Permission[] = accessTypes.map((accessType) => ({
+    accessType,
+    recordType: recordType as any,
+  }));
+  return requestHealthPermissions(permissionsToRequest);
+}
+
 /**
  * Revokes all granted permissions for this application.
  */
@@ -106,3 +135,4 @@ export async function revokeAppPermissions(): Promise<void> {
     console.error('[Permissions] Failed to revoke permissions:', error);
   }
 }
+

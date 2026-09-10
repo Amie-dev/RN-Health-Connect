@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export type SyncStatus = 'idle' | 'syncing' | 'error' | 'token_expired';
+export type SyncStatus = 'idle' | 'syncing' | 'error' | 'token_expired' | 'no_permission';
 
 export interface HealthConnectSyncState {
   recordType: string;

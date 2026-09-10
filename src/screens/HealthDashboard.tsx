@@ -28,6 +28,8 @@ import { getClientState, openSettings, openDataManagement } from '../health-conn
 import {
   requestHealthPermissions,
   checkHealthPermissions,
+  isPermissionGranted,
+  requestPermissionsForRecord,
   PermissionStatusResult,
 } from '../health-connect/permissions';
 import {
@@ -585,6 +587,21 @@ export default function HealthDashboard() {
 
     setLoading(true);
     try {
+      // Check write permission before inserting
+      const granted = permissionInfo?.grantedPermissions || [];
+      const hasWrite = isPermissionGranted(granted, logType, 'write');
+
+      if (!hasWrite) {
+        console.log(`[Dashboard] Write permission missing for ${logType}. Requesting permission...`);
+        try {
+          await requestPermissionsForRecord(logType, ['read', 'write']);
+          const updatedPerms = await checkHealthPermissions();
+          setPermissionInfo(updatedPerms);
+        } catch (permErr) {
+          console.warn('[Dashboard] Write permission prompt closed or denied:', permErr);
+        }
+      }
+
       const now = new Date().toISOString();
       const oneHourAgo = new Date(Date.now() - 3600 * 1000).toISOString();
 
@@ -1041,8 +1058,34 @@ export default function HealthDashboard() {
 
             {DEFAULT_SYNC_RECORD_TYPES.map((type) => {
               const state = syncStates[type];
-              const statusColor =
-                state?.status === 'idle' ? C.green : state?.status === 'syncing' ? C.primary : C.textMuted;
+              const granted = permissionInfo?.grantedPermissions || [];
+              const hasReadPerm = isPermissionGranted(granted, type, 'read');
+
+              let statusText = state?.status || (hasReadPerm ? 'idle' : 'no_permission');
+              if (!hasReadPerm && statusText !== 'syncing') {
+                statusText = 'no_permission';
+              }
+
+              let statusColor = C.textMuted;
+              let statusLabel = 'UNINITIALIZED';
+
+              if (statusText === 'idle') {
+                statusColor = C.green;
+                statusLabel = 'SYNCED';
+              } else if (statusText === 'syncing') {
+                statusColor = C.primary;
+                statusLabel = 'SYNCING';
+              } else if (statusText === 'no_permission') {
+                statusColor = C.amber;
+                statusLabel = 'NO PERMISSION';
+              } else if (statusText === 'token_expired') {
+                statusColor = C.rose;
+                statusLabel = 'EXPIRED';
+              } else if (statusText === 'error') {
+                statusColor = C.red;
+                statusLabel = 'ERROR';
+              }
+
               return (
                 <View key={type} style={styles.syncStateCard}>
                   <View style={styles.recordTopRow}>
@@ -1055,26 +1098,53 @@ export default function HealthDashboard() {
                         <View style={[styles.statusPill, { backgroundColor: statusColor + '26' }]}>
                           <View style={[styles.statusDot, styles.dotSm, { backgroundColor: statusColor }]} />
                           <Text style={[styles.statusPillText, { color: statusColor }]}>
-                            {state?.status || 'uninitialized'}
+                            {statusLabel}
                           </Text>
                         </View>
                       </View>
                       <Text style={styles.syncMetaText}>
-                        Token: {state?.changesToken ? `${state.changesToken.substring(0, 20)}…` : 'None — needs initial sync'}
+                        Token: {state?.changesToken ? `${state.changesToken.substring(0, 18)}…` : 'None — initial sync needed'}
                       </Text>
                       <Text style={styles.syncMetaText}>
                         Last sync: {state?.lastSuccessfulSyncAt ? new Date(state.lastSuccessfulSyncAt).toLocaleString() : 'Never'}
                       </Text>
+                      {state?.errorMessage && statusText !== 'no_permission' && (
+                        <Text style={[styles.syncMetaText, { color: C.red, marginTop: 3 }]} numberOfLines={2}>
+                          Error: {state.errorMessage}
+                        </Text>
+                      )}
                     </View>
                   </View>
 
                   <View style={styles.syncActionRow}>
-                    <TouchableOpacity
-                      style={styles.smallButton}
-                      onPress={() => SyncManager.syncRecordType(type).then(refreshAllData)}
-                    >
-                      <Text style={styles.smallButtonText}>Sync Type</Text>
-                    </TouchableOpacity>
+                    {statusText === 'no_permission' ? (
+                      <TouchableOpacity
+                        style={[styles.smallButton, { backgroundColor: C.amber }]}
+                        onPress={async () => {
+                          await requestPermissionsForRecord(type, ['read', 'write']);
+                          const updated = await checkHealthPermissions();
+                          setPermissionInfo(updated);
+                          await SyncManager.syncRecordType(type);
+                          await refreshAllData();
+                        }}
+                      >
+                        <Text style={[styles.smallButtonText, { color: '#0F172A' }]}>Grant Access</Text>
+                      </TouchableOpacity>
+                    ) : statusText === 'token_expired' ? (
+                      <TouchableOpacity
+                        style={[styles.smallButton, { backgroundColor: C.rose }]}
+                        onPress={() => handleTestTokenRecovery(type)}
+                      >
+                        <Text style={styles.smallButtonText}>Recover Token</Text>
+                      </TouchableOpacity>
+                    ) : (
+                      <TouchableOpacity
+                        style={styles.smallButton}
+                        onPress={() => SyncManager.syncRecordType(type).then(refreshAllData)}
+                      >
+                        <Text style={styles.smallButtonText}>Sync Type</Text>
+                      </TouchableOpacity>
+                    )}
                     <TouchableOpacity
                       style={styles.smallOutlineButton}
                       onPress={() => resetSyncState(type).then(refreshAllData)}

@@ -1,5 +1,5 @@
 import { AppState, AppStateStatus } from 'react-native';
-import { RecordType } from 'react-native-health-connect';
+import { RecordType, getGrantedPermissions } from 'react-native-health-connect';
 import { fetchChangesToken, fetchChanges } from '../changes';
 import { ChangeProcessor } from './changeProcessor';
 import { SyncRecovery } from './recovery';
@@ -33,6 +33,28 @@ export class SyncManager {
    */
   static async syncRecordType(recordType: RecordType): Promise<SyncResult> {
     try {
+      // 1. Check if read permission is granted FIRST to prevent SecurityExceptions
+      const granted = await getGrantedPermissions();
+      const hasReadPerm = granted.some(
+        (p: any) => p.recordType === recordType && p.accessType === 'read'
+      );
+
+      if (!hasReadPerm) {
+        console.warn(`[SyncManager] Read permission missing for ${recordType}, skipping sync.`);
+        await updateSyncState(recordType, {
+          status: 'no_permission',
+          errorMessage: `Read permission not granted for ${recordType}`,
+        });
+        return {
+          recordType,
+          success: false,
+          upsertedCount: 0,
+          deletedCount: 0,
+          tokenExpired: false,
+          error: `Read permission not granted for ${recordType}`,
+        };
+      }
+
       await updateSyncState(recordType, { status: 'syncing' });
 
       let token = await TokenStore.getToken(recordType);

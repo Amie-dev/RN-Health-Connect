@@ -182,6 +182,13 @@ export async function getTodayHealthSummary(): Promise<{
     }
   }
 
+  console.log({
+    steps,
+    activeCalories,
+    distanceKm,
+    avgHeartRate,
+  })
+
   return {
     steps,
     activeCalories,

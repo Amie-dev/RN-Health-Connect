@@ -1,60 +1,95 @@
-import { RecordType } from 'react-native-health-connect';
-import { queryHealthRecords, TimeRangeFilter } from '../records';
+import { type RecordType } from 'react-native-health-connect';
 import { fetchChangesToken } from '../changes';
-import { upsertLocalHealthRecord } from '../../database/healthRecords';
+import { readAllHealthRecords } from '../records';
+import { upsertLocalHealthRecords, type LocalRecordPatch } from '../../database/healthRecords';
 import { getSyncState, updateSyncState } from '../../database/syncState';
+import { MS_PER_DAY } from '../../config';
 
+export interface RecoveryResult {
+  recordType: RecordType;
+  success: boolean;
+  recoveredCount: number;
+  /** True when the sweep hit the page cap and only part of the window was read. */
+  truncated: boolean;
+  error: string | null;
+}
+
+/**
+ * Recovers from an expired Changes token.
+ *
+ * Health Connect invalidates a token after ~30 days of inactivity, after which
+ * `getChanges` reports `changesTokenExpired`. Recovery re-reads everything that
+ * changed since the last successful sync, mirrors it locally and mints a fresh
+ * token — so no data is lost while the app was idle.
+ */
 export class SyncRecovery {
-  /**
-   * Recovers from token expiration by querying records since last sync time,
-   * updating local database, requesting a new Changes token, and resetting sync state.
-   */
-  static async recoverFromExpiredToken(recordType: RecordType): Promise<string> {
-    console.log(`[SyncRecovery] Starting recovery for expired token on ${recordType}...`);
+  static async recoverFromExpiredToken(recordType: RecordType): Promise<RecoveryResult> {
+    console.log(`[SyncRecovery] Recovering expired token for ${recordType}…`);
+    const state = await getSyncState(recordType);
 
-    const currentState = await getSyncState(recordType);
+    const endTime = new Date();
+    const startTime = state?.lastSuccessfulSyncAt
+      ? new Date(state.lastSuccessfulSyncAt)
+      : new Date(endTime.getTime() - 30 * MS_PER_DAY);
 
-    // Determine recovery start timestamp (last sync or fallback 30 days ago)
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const startTime = currentState?.lastSuccessfulSyncAt || thirtyDaysAgo;
-    const endTime = new Date().toISOString();
-
-    const timeRangeFilter: TimeRangeFilter = {
-      operator: 'between',
-      startTime,
-      endTime,
-    };
-
-    // 1. Read existing Health Connect records in range
-    const response = await queryHealthRecords(recordType, {
-      timeRangeFilter,
-      pageSize: 1000,
-    });
-
-    console.log(
-      `[SyncRecovery] Fetched ${response.records.length} records during recovery for ${recordType}`
-    );
-
-    // 2. Upsert into local database
-    for (const record of response.records) {
-      const hcId = record.metadata?.id;
-      if (hcId) {
-        await upsertLocalHealthRecord(hcId, recordType, record);
-      }
+    // Guard against an implausible stored timestamp (clock changes, corrupt state).
+    if (!Number.isFinite(startTime.getTime()) || startTime > endTime) {
+      startTime.setTime(endTime.getTime() - 30 * MS_PER_DAY);
     }
 
-    // 3. Request new Changes token
-    const newToken = await fetchChangesToken([recordType]);
-
-    // 4. Update sync state
-    await updateSyncState(recordType, {
-      changesToken: newToken,
-      status: 'idle',
-      lastSuccessfulSyncAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+    const page = await readAllHealthRecords<Record<string, any>>(recordType, {
+      timeRangeFilter: {
+        operator: 'between',
+        startTime: startTime.toISOString(),
+        endTime: endTime.toISOString(),
+      },
+      ascendingOrder: true,
     });
 
-    console.log(`[SyncRecovery] Recovery complete for ${recordType}. New token generated.`);
-    return newToken;
+    if (page.error) {
+      await updateSyncState(recordType, { status: 'error', errorMessage: page.error });
+      return { recordType, success: false, recoveredCount: 0, truncated: false, error: page.error };
+    }
+
+    const patches: LocalRecordPatch[] = [];
+    for (const record of page.records) {
+      const healthConnectId = record?.metadata?.id;
+      if (healthConnectId) {
+        patches.push({ healthConnectId, recordType: record.recordType ?? recordType, payload: record });
+      }
+    }
+    const writeResult = await upsertLocalHealthRecords(patches);
+
+    const tokenResult = await fetchChangesToken([recordType]);
+    if (!tokenResult.token) {
+      await updateSyncState(recordType, {
+        status: 'error',
+        errorMessage: tokenResult.error ?? 'Could not create a new changes token',
+      });
+      return {
+        recordType,
+        success: false,
+        recoveredCount: writeResult.changed,
+        truncated: !page.complete,
+        error: tokenResult.error ?? 'Could not create a new changes token',
+      };
+    }
+
+    await updateSyncState(recordType, {
+      changesToken: tokenResult.token,
+      status: 'idle',
+      errorMessage: undefined,
+      lastSuccessfulSyncAt: new Date().toISOString(),
+      lastSyncedCount: writeResult.changed,
+    });
+
+    console.log(`[SyncRecovery] Recovered ${writeResult.changed} record(s) for ${recordType}`);
+    return {
+      recordType,
+      success: true,
+      recoveredCount: writeResult.changed,
+      truncated: !page.complete,
+      error: writeResult.error,
+    };
   }
 }

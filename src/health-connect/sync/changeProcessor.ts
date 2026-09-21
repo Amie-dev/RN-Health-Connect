@@ -1,64 +1,66 @@
-import { ChangesResponse } from '../changes';
+import type { HealthChange } from '../changes';
 import {
-  upsertLocalHealthRecord,
-  deleteLocalHealthRecordByHCId,
+  deleteLocalHealthRecordsByIds,
+  upsertLocalHealthRecords,
+  type LocalRecordPatch,
 } from '../../database/healthRecords';
 
 export interface ProcessChangesResult {
   upsertedCount: number;
   deletedCount: number;
-  ignoredSelfWritesCount: number;
+  /** Changes that could not be applied (missing record id / type). */
+  skippedCount: number;
+  error: string | null;
 }
 
+/**
+ * Turns a page of Changes API results into **two** storage writes (one upsert
+ * batch, one delete batch) instead of one write per record.
+ *
+ * Records are de-duplicated by Health Connect ID inside the batch, so a page
+ * that touches the same record twice only costs one write.
+ */
 export class ChangeProcessor {
-  /**
-   * Processes a list of changes (upserts & deletes) returned by getChanges.
-   * If ignoreOwnPackageName is provided, ignores upsert changes created by own app.
-   */
-  static async processChanges(
-    changes: ChangesResponse['changes'],
-    ignoreOwnPackageName?: string
-  ): Promise<ProcessChangesResult> {
-    let upsertedCount = 0;
-    let deletedCount = 0;
-    let ignoredSelfWritesCount = 0;
+  static async processChanges(changes: HealthChange[]): Promise<ProcessChangesResult> {
+    const upserts = new Map<string, LocalRecordPatch>();
+    const deletions = new Set<string>();
+    let skippedCount = 0;
 
     for (const change of changes) {
       if (change.type === 'upsert') {
-        const record = change.record;
-        const healthConnectId = record.metadata?.id;
+        const { record } = change;
+        const healthConnectId = record?.metadata?.id;
+        const recordType = record?.recordType;
 
-        if (!healthConnectId) {
-          console.warn('[ChangeProcessor] Received upsert change without metadata.id:', record);
+        if (!healthConnectId || !recordType) {
+          skippedCount += 1;
+          console.warn('[ChangeProcessor] Upsert change without id/recordType:', record);
           continue;
         }
 
-        // Loop prevention rule: ignore self-written records if requested
-        if (
-          ignoreOwnPackageName &&
-          record.metadata?.dataOrigin === ignoreOwnPackageName
-        ) {
-          ignoredSelfWritesCount++;
-          continue;
-        }
-
-        await upsertLocalHealthRecord(healthConnectId, record.recordType, record);
-        upsertedCount++;
-      } else if (change.type === 'delete') {
-        const healthConnectId = change.recordId;
-        if (healthConnectId) {
-          const deleted = await deleteLocalHealthRecordByHCId(healthConnectId);
-          if (deleted) {
-            deletedCount++;
-          }
-        }
+        upserts.set(healthConnectId, { healthConnectId, recordType, payload: record });
+      } else if (change.recordId) {
+        deletions.add(change.recordId);
+      } else {
+        skippedCount += 1;
       }
     }
 
+    // A delete wins over an upsert of the same id within one batch.
+    for (const id of deletions) {
+      upserts.delete(id);
+    }
+
+    const [upsertResult, deleteResult] = await Promise.all([
+      upsertLocalHealthRecords([...upserts.values()]),
+      deleteLocalHealthRecordsByIds([...deletions]),
+    ]);
+
     return {
-      upsertedCount,
-      deletedCount,
-      ignoredSelfWritesCount,
+      upsertedCount: upsertResult.changed,
+      deletedCount: deleteResult.changed,
+      skippedCount,
+      error: upsertResult.error ?? deleteResult.error,
     };
   }
 }

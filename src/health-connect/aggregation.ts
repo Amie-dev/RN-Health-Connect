@@ -1,198 +1,323 @@
 import {
   aggregateRecord,
-  RecordType,
-  AggregateRequest,
+  type AggregateResult,
+  type AggregateResultRecordType,
 } from 'react-native-health-connect';
-import { queryHealthRecords, TimeRangeFilter } from './records';
-
-export interface AggregateMetricResult {
-  COUNT_TOTAL?: number;
-  STEPS_COUNT_TOTAL?: number;
-  ACTIVE_CALORIES_TOTAL?: number;
-  ENERGY_TOTAL?: number;
-  TOTAL_CALORIES_TOTAL?: number;
-  DISTANCE_TOTAL?: {
-    inMeters?: number;
-    inKilometers?: number;
-    inMiles?: number;
-  };
-  BPM_AVG?: number;
-  BPM_MIN?: number;
-  BPM_MAX?: number;
-  HYDRATION_TOTAL?: {
-    inLiters?: number;
-    inMilliliters?: number;
-  };
-  [key: string]: any;
-}
-
-/** Helper to extract numeric energy in kilocalories from various Health Connect object/number formats */
-function extractEnergyInKcal(val: any): number {
-  if (val == null) return 0;
-  if (typeof val === 'number') return isNaN(val) ? 0 : val;
-  if (typeof val === 'object') {
-    const kcal = val.inKilocalories ?? val.inCalories ?? val.value ?? (val.inJoules ? val.inJoules / 4184 : 0);
-    return isNaN(Number(kcal)) ? 0 : Number(kcal);
-  }
-  const parsed = parseFloat(val);
-  return isNaN(parsed) ? 0 : parsed;
-}
-
-/** Helper to extract numeric distance in kilometers */
-function extractDistanceKm(val: any): number {
-  if (val == null) return 0;
-  if (typeof val === 'number') return isNaN(val) ? 0 : val;
-  if (typeof val === 'object') {
-    if (val.inKilometers != null) return Number(val.inKilometers) || 0;
-    if (val.inMeters != null) return (Number(val.inMeters) || 0) / 1000;
-    if (val.value != null) return Number(val.value) || 0;
-  }
-  const parsed = parseFloat(val);
-  return isNaN(parsed) ? 0 : parsed;
-}
-
-/** Helper to extract numeric values safely */
-function extractNumber(val: any): number | null {
-  if (val == null) return null;
-  if (typeof val === 'number') return isNaN(val) ? null : val;
-  if (typeof val === 'object') {
-    const num = val.value ?? val.inKilograms ?? val.beatsPerMinute ?? val.count ?? null;
-    return num != null && !isNaN(Number(num)) ? Number(num) : null;
-  }
-  const parsed = parseFloat(val);
-  return isNaN(parsed) ? null : parsed;
-}
+import { readAllHealthRecords, queryHealthRecords, type QueryResult, type TimeRangeFilter } from './records';
+import { HISTORY_WINDOW_DAYS, MS_PER_DAY } from '../config';
 
 /**
- * Computes single metric aggregations for a single recordType over a given time range.
+ * Aggregation module.
+ *
+ * Every metric key below was verified against the native module
+ * (`react-native-health-connect/react-native-health-connect` Android sources),
+ * because the JS layer simply forwards whatever key the provider used:
+ *
+ *  - Steps                  -> COUNT_TOTAL
+ *  - ActiveCaloriesBurned   -> ACTIVE_CALORIES_TOTAL
+ *  - TotalCaloriesBurned    -> ENERGY_TOTAL
+ *  - Distance               -> DISTANCE            (NOT "DISTANCE_TOTAL")
+ *  - HeartRate              -> BPM_AVG
+ *  - Hydration              -> VOLUME_TOTAL
+ *  - SleepSession           -> SLEEP_DURATION_TOTAL (seconds)
+ *
+ * `aggregate()` is generic over the record type, so a wrong key is now a
+ * compile error instead of a silent zero.
  */
-export async function getRecordAggregation(
-  recordType: RecordType,
-  timeRangeFilter: TimeRangeFilter,
-  dataOriginFilter?: string[]
-): Promise<AggregateMetricResult> {
-  try {
-    const request: AggregateRequest<any> = {
-      recordType: recordType as any,
-      timeRangeFilter: timeRangeFilter as any,
-      dataOriginFilter,
-    };
-    const result = await aggregateRecord(request);
-    return (result || {}) as AggregateMetricResult;
-  } catch (error) {
-    console.error(`[Aggregation] Failed aggregateRecord for ${recordType}:`, error);
-    return {};
-  }
-}
 
-/**
- * Helper to fetch summary metrics for today (Steps, Active Calories, Distance, Heart Rate average).
- */
-export async function getTodayHealthSummary(): Promise<{
+export interface HealthSummary {
   steps: number;
   activeCalories: number;
   distanceKm: number;
   avgHeartRate: number | null;
-}> {
-  const now = new Date();
-  const startOfDay = new Date();
-  startOfDay.setHours(0, 0, 0, 0);
+  hydrationLiters: number;
+  /** Total sleep duration inside the window, in minutes. */
+  sleepMinutes: number | null;
+  latestWeightKg: number | null;
+  rangeStart: string;
+  rangeEnd: string;
+  /** True when at least one metric could not be resolved (permission/provider error). */
+  partial: boolean;
+}
 
-  const timeRangeFilter: TimeRangeFilter = {
-    operator: 'between',
-    startTime: startOfDay.toISOString(),
-    endTime: now.toISOString(),
-  };
+/* -------------------------------------------------------------------------- */
+/* Value extractors — the wrapper returns nested "<unit>Result" objects       */
+/* -------------------------------------------------------------------------- */
 
-  const [stepsRes, activeCalRes, totalCalRes, distanceRes, hrRes] = await Promise.all([
-    getRecordAggregation('Steps', timeRangeFilter),
-    getRecordAggregation('ActiveCaloriesBurned', timeRangeFilter),
-    getRecordAggregation('TotalCaloriesBurned', timeRangeFilter),
-    getRecordAggregation('Distance', timeRangeFilter),
-    getRecordAggregation('HeartRate', timeRangeFilter),
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'string') {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  if (value && typeof value === 'object' && 'value' in (value as Record<string, unknown>)) {
+    return toFiniteNumber((value as { value: unknown }).value);
+  }
+  return null;
+}
+
+function energyToKcal(value: unknown): number | null {
+  if (!value || typeof value !== 'object') return toFiniteNumber(value);
+  const energy = value as { inKilocalories?: number; inCalories?: number; inJoules?: number };
+  if (energy.inKilocalories != null) return energy.inKilocalories;
+  if (energy.inCalories != null) return energy.inCalories;
+  if (energy.inJoules != null) return energy.inJoules / 4184;
+  return null;
+}
+
+function lengthToKm(value: unknown): number | null {
+  if (!value || typeof value !== 'object') return toFiniteNumber(value);
+  const length = value as { inKilometers?: number; inMeters?: number; inMiles?: number };
+  if (length.inKilometers != null) return length.inKilometers;
+  if (length.inMeters != null) return length.inMeters / 1000;
+  if (length.inMiles != null) return length.inMiles * 1.60934;
+  return null;
+}
+
+function volumeToLiters(value: unknown): number | null {
+  if (!value || typeof value !== 'object') return toFiniteNumber(value);
+  const volume = value as { inLiters?: number; inMilliliters?: number; inFluidOuncesUs?: number };
+  if (volume.inLiters != null) return volume.inLiters;
+  if (volume.inMilliliters != null) return volume.inMilliliters / 1000;
+  if (volume.inFluidOuncesUs != null) return volume.inFluidOuncesUs * 0.0295735;
+  return null;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Generic aggregate call                                                     */
+/* -------------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------- */
+/* Generic aggregate call                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Runs a single-record-type aggregation. Returns `null` (instead of throwing or
+ * a bogus zero) when Health Connect refuses the request, so callers can tell
+ * "no data" apart from "could not read".
+ */
+export async function aggregate<T extends AggregateResultRecordType>(
+  recordType: T,
+  timeRangeFilter: TimeRangeFilter,
+  dataOriginFilter?: string[]
+): Promise<AggregateResult<T> | null> {
+  try {
+    const result = await aggregateRecord<T>({ recordType, timeRangeFilter, dataOriginFilter });
+    return result ?? null;
+  } catch (error) {
+    console.warn(`[Aggregation] aggregateRecord failed for ${recordType}:`, error);
+    return null;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Raw-record fallbacks                                                       */
+/*                                                                            */
+/* Health Connect sometimes reports an aggregate while the provider has no    */
+/* pre-computed value yet (or refuses a specific metric), so each metric falls */
+/* back to summing the underlying records — the same defensive pattern the     */
+/* app already had for steps/calories, now applied consistently.              */
+/* -------------------------------------------------------------------------- */
+
+interface MetricResult<T> {
+  value: T;
+  /** True when neither the aggregate nor the fallback produced a number. */
+  failed: boolean;
+}
+
+const ok = <T>(value: T): MetricResult<T> => ({ value, failed: false });
+const failed = <T>(value: T): MetricResult<T> => ({ value, failed: true });
+
+async function readWindow(
+  recordType: Parameters<typeof readAllHealthRecords>[0],
+  range: TimeRangeFilter
+): Promise<QueryResult<HealthChangeRecordLike>> {
+  return readAllHealthRecords<HealthChangeRecordLike>(recordType, { timeRangeFilter: range });
+}
+
+/** Shape we rely on when summing raw records. */
+type HealthChangeRecordLike = Record<string, any>;
+
+async function sumSteps(range: TimeRangeFilter): Promise<MetricResult<number>> {
+  const page = await readWindow('Steps', range);
+  if (page.error) return failed(0);
+  return ok(page.records.reduce((total, record) => total + (toFiniteNumber(record.count) ?? 0), 0));
+}
+
+async function sumCalories(range: TimeRangeFilter): Promise<MetricResult<number>> {
+  const [active, total] = await Promise.all([
+    readWindow('ActiveCaloriesBurned', range),
+    readWindow('TotalCaloriesBurned', range),
   ]);
+  if (active.error && total.error) return failed(0);
 
-  let steps = extractNumber(stepsRes.COUNT_TOTAL ?? stepsRes.STEPS_COUNT_TOTAL ?? stepsRes.count) ?? 0;
-
-  let activeCalories = extractEnergyInKcal(
-    activeCalRes.ACTIVE_CALORIES_TOTAL ??
-    activeCalRes.ENERGY_TOTAL ??
-    totalCalRes.ENERGY_TOTAL ??
-    totalCalRes.TOTAL_CALORIES_TOTAL
+  // Prefer active calories; only fall back to total when active is empty.
+  const activeKcal = active.records.reduce(
+    (sum, record) => sum + (energyToKcal(record.energy) ?? 0),
+    0
   );
+  if (activeKcal > 0) return ok(activeKcal);
 
-  let distanceKm = extractDistanceKm(distanceRes.DISTANCE_TOTAL ?? distanceRes.distanceKm);
-  let avgHeartRate = extractNumber(hrRes.BPM_AVG ?? hrRes.avgHeartRate);
+  return ok(total.records.reduce((sum, record) => sum + (energyToKcal(record.energy) ?? 0), 0));
+}
 
-  // Fallback: If steps aggregate returned 0, try summing raw step records for today
-  if (!steps) {
-    try {
-      const rawSteps = await queryHealthRecords('Steps', { timeRangeFilter, pageSize: 500 });
-      if (rawSteps.records && rawSteps.records.length > 0) {
-        steps = rawSteps.records.reduce((sum: number, r: any) => sum + (extractNumber(r.count) || 0), 0);
+async function sumDistanceKm(range: TimeRangeFilter): Promise<MetricResult<number>> {
+  const page = await readWindow('Distance', range);
+  if (page.error) return failed(0);
+  return ok(page.records.reduce((sum, record) => sum + (lengthToKm(record.distance) ?? 0), 0));
+}
+
+async function sumHydrationLiters(range: TimeRangeFilter): Promise<MetricResult<number>> {
+  const page = await readWindow('Hydration', range);
+  if (page.error) return failed(0);
+  return ok(page.records.reduce((sum, record) => sum + (volumeToLiters(record.volume) ?? 0), 0));
+}
+
+async function averageHeartRate(range: TimeRangeFilter): Promise<MetricResult<number | null>> {
+  const page = await readWindow('HeartRate', range);
+  if (page.error) return failed(null);
+
+  let totalBpm = 0;
+  let sampleCount = 0;
+  for (const record of page.records) {
+    if (!Array.isArray(record.samples)) continue;
+    for (const sample of record.samples) {
+      const bpm = toFiniteNumber(sample?.beatsPerMinute);
+      if (bpm != null) {
+        totalBpm += bpm;
+        sampleCount += 1;
       }
-    } catch (e) {
-      console.warn('[Aggregation] Raw steps fallback query error:', e);
     }
   }
 
-  // Fallback: If calories aggregate returned 0, try summing raw calories for today
-  if (!activeCalories) {
-    try {
-      const [rawActiveCal, rawTotalCal] = await Promise.all([
-        queryHealthRecords('ActiveCaloriesBurned', { timeRangeFilter, pageSize: 500 }),
-        queryHealthRecords('TotalCaloriesBurned', { timeRangeFilter, pageSize: 500 }),
-      ]);
-      const records = [...(rawActiveCal.records || []), ...(rawTotalCal.records || [])];
-      if (records.length > 0) {
-        activeCalories = records.reduce((sum: number, r: any) => {
-          const cal = extractEnergyInKcal(r.energy ?? r.activeCalories ?? r.totalCalories);
-          return sum + cal;
-        }, 0);
-      }
-    } catch (e) {
-      console.warn('[Aggregation] Raw calories fallback query error:', e);
-    }
-  }
+  return ok(sampleCount > 0 ? Math.round(totalBpm / sampleCount) : null);
+}
 
-  // Fallback: If heart rate aggregate returned null, try averaging raw heart rate records for today
-  if (avgHeartRate == null) {
-    try {
-      const rawHr = await queryHealthRecords('HeartRate', { timeRangeFilter, pageSize: 500 });
-      if (rawHr.records && rawHr.records.length > 0) {
-        let totalBpm = 0;
-        let count = 0;
-        for (const r of rawHr.records) {
-          if (Array.isArray(r.samples)) {
-            for (const s of r.samples) {
-              const bpm = extractNumber(s.beatsPerMinute);
-              if (bpm != null) {
-                totalBpm += bpm;
-                count++;
-              }
-            }
-          }
-        }
-        if (count > 0) {
-          avgHeartRate = Math.round(totalBpm / count);
-        }
-      }
-    } catch (e) {
-      console.warn('[Aggregation] Raw heart rate fallback query error:', e);
-    }
-  }
+async function sumSleepMinutes(range: TimeRangeFilter): Promise<MetricResult<number | null>> {
+  const page = await readWindow('SleepSession', range);
+  if (page.error) return failed(null);
 
-  console.log({
-    steps,
-    activeCalories,
-    distanceKm,
-    avgHeartRate,
-  })
+  const minutes = page.records.reduce((total, record) => {
+    const start = Date.parse(record.startTime ?? '');
+    const end = Date.parse(record.endTime ?? '');
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return total;
+    return total + (end - start) / 60000;
+  }, 0);
 
+  return ok(minutes > 0 ? Math.round(minutes) : null);
+}
+
+/** Latest weight measurement inside the window (Health Connect has no "latest" aggregate). */
+async function latestWeight(range: TimeRangeFilter): Promise<MetricResult<number | null>> {
+  const page = await queryHealthRecords<HealthChangeRecordLike>('Weight', {
+    timeRangeFilter: range,
+    pageSize: 1,
+    ascendingOrder: false,
+  });
+  if (page.error) return failed(null);
+
+  const weight = page.records[0]?.weight;
+  const kilograms = weight?.inKilograms ?? toFiniteNumber(weight);
+  return ok(kilograms ?? null);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Public summary API                                                         */
+/* -------------------------------------------------------------------------- */
+
+/** Inclusive time range for a query. */
+export function buildTimeRange(start: Date, end: Date): TimeRangeFilter {
   return {
-    steps,
-    activeCalories,
-    distanceKm,
-    avgHeartRate,
+    operator: 'between',
+    startTime: new Date(start).toISOString(),
+    endTime: new Date(end).toISOString(),
   };
 }
+
+/** Midnight (local time) of the day the given date belongs to. */
+export function startOfLocalDay(date: Date = new Date()): Date {
+  const start = new Date(date);
+  start.setHours(0, 0, 0, 0);
+  return start;
+}
+
+/**
+ * Resolves every dashboard metric for a time window.
+ *
+ * Aggregates run in parallel first (one IPC batch), then only the metrics that
+ * came back empty trigger a raw-record fallback — so a normal refresh costs a
+ * handful of calls instead of a full history read.
+ */
+export async function getHealthSummary(
+  start: Date = startOfLocalDay(),
+  end: Date = new Date()
+): Promise<HealthSummary> {
+  const rangeStart = new Date(start).toISOString();
+  const rangeEnd = new Date(end).toISOString();
+  const range: TimeRangeFilter = { operator: 'between', startTime: rangeStart, endTime: rangeEnd };
+
+  const [stepsAgg, activeCalAgg, totalCalAgg, distanceAgg, hrAgg, hydrationAgg, sleepAgg] =
+    await Promise.all([
+      aggregate('Steps', range),
+      aggregate('ActiveCaloriesBurned', range),
+      aggregate('TotalCaloriesBurned', range),
+      aggregate('Distance', range),
+      aggregate('HeartRate', range),
+      aggregate('Hydration', range),
+      aggregate('SleepSession', range),
+    ]);
+
+  // Aggregate values (correct native metric keys — see the module header).
+  const aggregateSteps = stepsAgg?.COUNT_TOTAL ?? null;
+  const aggregateCalories =
+    energyToKcal(activeCalAgg?.ACTIVE_CALORIES_TOTAL) ??
+    energyToKcal(totalCalAgg?.ENERGY_TOTAL);
+  const aggregateDistanceKm = lengthToKm(distanceAgg?.DISTANCE);
+  const aggregateHeartRate =
+    hrAgg && (hrAgg.MEASUREMENTS_COUNT ?? 0) > 0 ? hrAgg.BPM_AVG ?? null : null;
+  const aggregateHydrationLiters = volumeToLiters(hydrationAgg?.VOLUME_TOTAL);
+  const aggregateSleepSeconds = sleepAgg?.SLEEP_DURATION_TOTAL ?? null;
+
+  // Fallbacks only where the aggregate is unavailable or zero.
+  const [steps, calories, distanceKm, hydrationLiters, heartRate, sleepMinutes, weight] =
+    await Promise.all([
+      aggregateSteps ? Promise.resolve(ok(aggregateSteps)) : sumSteps(range),
+      aggregateCalories ? Promise.resolve(ok(aggregateCalories)) : sumCalories(range),
+      aggregateDistanceKm ? Promise.resolve(ok(aggregateDistanceKm)) : sumDistanceKm(range),
+      aggregateHydrationLiters ? Promise.resolve(ok(aggregateHydrationLiters)) : sumHydrationLiters(range),
+      aggregateHeartRate != null ? Promise.resolve(ok(aggregateHeartRate)) : averageHeartRate(range),
+      aggregateSleepSeconds != null
+        ? Promise.resolve(ok(Math.round((aggregateSleepSeconds ?? 0) / 60)))
+        : sumSleepMinutes(range),
+      latestWeight(range),
+    ]);
+
+  const metrics = [steps, calories, distanceKm, hydrationLiters, heartRate, sleepMinutes, weight];
+  const partial = metrics.some((metric) => metric.failed);
+
+  return {
+    steps: steps.value ?? 0,
+    activeCalories: Math.round(calories.value ?? 0),
+    distanceKm: distanceKm.value ?? 0,
+    avgHeartRate: heartRate.value,
+    hydrationLiters: Number((hydrationLiters.value ?? 0).toFixed(2)),
+    sleepMinutes: sleepMinutes.value,
+    latestWeightKg: weight.value,
+    rangeStart,
+    rangeEnd,
+    partial,
+  };
+}
+
+/** Summary for the current calendar day (midnight → now). */
+export function getTodaySummary(): Promise<HealthSummary> {
+  return getHealthSummary(startOfLocalDay(), new Date());
+}
+
+/** Summary for the trailing `days` window, ending now. */
+export function getWindowSummary(days = HISTORY_WINDOW_DAYS): Promise<HealthSummary> {
+  const end = new Date();
+  return getHealthSummary(new Date(end.getTime() - days * MS_PER_DAY), end);
+}
+
+

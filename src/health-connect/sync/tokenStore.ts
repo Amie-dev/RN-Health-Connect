@@ -1,35 +1,24 @@
 import { getSyncState, updateSyncState } from '../../database/syncState';
 
 /**
- * Interface to store and retrieve Changes tokens per record type.
+ * Persists the Changes API cursor per record type.
+ * Thin, typed wrapper over the sync-state store so the sync engine never
+ * touches AsyncStorage directly.
  */
 export class TokenStore {
-  /**
-   * Gets stored Changes token for a specific record type.
-   */
+  /** Stored token for a record type, or null when no initial sync has happened. */
   static async getToken(recordType: string): Promise<string | null> {
     const state = await getSyncState(recordType);
-    return state?.changesToken || null;
+    return state?.changesToken ?? null;
   }
 
-  /**
-   * Saves updated Changes token for a specific record type.
-   */
-  static async saveToken(recordType: string, changesToken: string): Promise<void> {
-    await updateSyncState(recordType, {
-      changesToken,
-      updatedAt: new Date().toISOString(),
-    });
+  /** Persists a freshly obtained / advanced token. */
+  static saveToken(recordType: string, changesToken: string): Promise<void> {
+    return updateSyncState(recordType, { changesToken }).then(() => undefined);
   }
 
-  /**
-   * Clears the Changes token for a record type (e.g. when expired or resetting).
-   */
+  /** Marks a token as expired so the next sync runs the recovery path. */
   static async clearToken(recordType: string): Promise<void> {
-    await updateSyncState(recordType, {
-      changesToken: null,
-      status: 'token_expired',
-      updatedAt: new Date().toISOString(),
-    });
+    await updateSyncState(recordType, { changesToken: null, status: 'token_expired' });
   }
 }

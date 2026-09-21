@@ -4,79 +4,104 @@ export type SyncStatus = 'idle' | 'syncing' | 'error' | 'token_expired' | 'no_pe
 
 export interface HealthConnectSyncState {
   recordType: string;
+  /** Cursor for the Changes API. `null` means "no initial sync yet". */
   changesToken: string | null;
   lastSuccessfulSyncAt: string | null;
   status: SyncStatus;
   updatedAt: string;
   errorMessage?: string;
+  /** Records mirrored during the last successful run (nice for the console UI). */
+  lastSyncedCount?: number;
 }
 
 const SYNC_STATE_STORAGE_KEY = '@health_connect_sync_state';
 
+let cache: Record<string, HealthConnectSyncState> | null = null;
+
 /**
- * Retrieves all stored sync states mapped by recordType.
+ * Serialized writer — the sync engine updates several record types in sequence
+ * and the UI can reset a single type at any time, so concurrent read-modify-write
+ * cycles would otherwise drop updates.
  */
+let writeQueue: Promise<unknown> = Promise.resolve();
+
+function enqueue<T>(task: () => Promise<T>): Promise<T> {
+  const run = writeQueue.then(task, task);
+  writeQueue = run.catch(() => undefined);
+  return run;
+}
+
+/** All sync states keyed by record type. */
 export async function getAllSyncStates(): Promise<Record<string, HealthConnectSyncState>> {
+  if (cache) return { ...cache };
   try {
     const raw = await AsyncStorage.getItem(SYNC_STATE_STORAGE_KEY);
-    if (!raw) return {};
-    return JSON.parse(raw);
+    const parsed: unknown = raw ? JSON.parse(raw) : {};
+    const states =
+      parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? (parsed as Record<string, HealthConnectSyncState>)
+        : {};
+    cache = states;
+    return { ...states };
   } catch (error) {
-    console.error('[SyncStateDB] Failed to read sync state DB:', error);
+    console.error('[SyncStateDB] Failed to read sync state:', error);
     return {};
   }
 }
 
-/**
- * Retrieves sync state for a specific record type.
- */
+/** Sync state for a single record type (null when never synced). */
 export async function getSyncState(recordType: string): Promise<HealthConnectSyncState | null> {
-  const allStates = await getAllSyncStates();
-  return allStates[recordType] || null;
+  const states = await getAllSyncStates();
+  return states[recordType] ?? null;
 }
 
-/**
- * Updates or creates the sync state for a specific record type.
- */
-export async function updateSyncState(
+/** Creates or patches the sync state for one record type. */
+export function updateSyncState(
   recordType: string,
   partialState: Partial<HealthConnectSyncState>
 ): Promise<HealthConnectSyncState> {
-  const allStates = await getAllSyncStates();
-  const existing = allStates[recordType] || {
-    recordType,
-    changesToken: null,
-    lastSuccessfulSyncAt: null,
-    status: 'idle',
-    updatedAt: new Date().toISOString(),
-  };
+  return enqueue(async () => {
+    const states = await getAllSyncStates();
+    const existing: HealthConnectSyncState = states[recordType] ?? {
+      recordType,
+      changesToken: null,
+      lastSuccessfulSyncAt: null,
+      status: 'idle',
+      updatedAt: new Date().toISOString(),
+    };
 
-  const updated: HealthConnectSyncState = {
-    ...existing,
-    ...partialState,
-    recordType,
-    updatedAt: new Date().toISOString(),
-  };
+    const updated: HealthConnectSyncState = {
+      ...existing,
+      ...partialState,
+      recordType,
+      updatedAt: new Date().toISOString(),
+    };
 
-  allStates[recordType] = updated;
-  try {
-    await AsyncStorage.setItem(SYNC_STATE_STORAGE_KEY, JSON.stringify(allStates));
-  } catch (error) {
-    console.error(`[SyncStateDB] Failed to save sync state for ${recordType}:`, error);
-  }
-
-  return updated;
+    cache = { ...states, [recordType]: updated };
+    try {
+      await AsyncStorage.setItem(SYNC_STATE_STORAGE_KEY, JSON.stringify(cache));
+    } catch (error) {
+      console.error(`[SyncStateDB] Failed to persist state for ${recordType}:`, error);
+    }
+    return updated;
+  });
 }
 
-/**
- * Resets sync state for a given record type or all types.
- */
-export async function resetSyncState(recordType?: string): Promise<void> {
-  if (!recordType) {
-    await AsyncStorage.removeItem(SYNC_STATE_STORAGE_KEY);
-    return;
-  }
-  const allStates = await getAllSyncStates();
-  delete allStates[recordType];
-  await AsyncStorage.setItem(SYNC_STATE_STORAGE_KEY, JSON.stringify(allStates));
+/** Clears the sync state for one type, or everything when omitted. */
+export function resetSyncState(recordType?: string): Promise<void> {
+  return enqueue(async () => {
+    try {
+      if (!recordType) {
+        cache = {};
+        await AsyncStorage.removeItem(SYNC_STATE_STORAGE_KEY);
+        return;
+      }
+      const states = await getAllSyncStates();
+      const { [recordType]: _removed, ...rest } = states;
+      cache = rest;
+      await AsyncStorage.setItem(SYNC_STATE_STORAGE_KEY, JSON.stringify(rest));
+    } catch (error) {
+      console.error('[SyncStateDB] Failed to reset sync state:', error);
+    }
+  });
 }

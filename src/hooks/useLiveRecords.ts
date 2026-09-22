@@ -24,7 +24,8 @@ export interface UseLiveRecordsResult {
  */
 export function useLiveRecords(
   initialRecordType: RecordType = 'Steps',
-  windowDays = HISTORY_WINDOW_DAYS
+  windowDays = HISTORY_WINDOW_DAYS,
+  enabled = true
 ): UseLiveRecordsResult {
   const [recordType, setRecordType] = useState<RecordType>(initialRecordType);
   const [records, setRecords] = useState<any[]>([]);
@@ -72,10 +73,16 @@ export function useLiveRecords(
     }
   }, [recordType, windowDays]);
 
-  // Re-reads whenever the selected type changes.
+  // Re-reads whenever the selected type changes — but only once permissions
+  // exist; before that every native read would just fail.
   useEffect(() => {
+    if (!enabled) {
+      setError(null);
+      setRecords([]);
+      return;
+    }
     void refresh();
-  }, [refresh]);
+  }, [refresh, enabled]);
 
   return { recordType, setRecordType, records, loading, error, truncated, refresh };
 }

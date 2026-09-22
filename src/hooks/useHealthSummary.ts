@@ -35,7 +35,10 @@ function rangeStart(range: SummaryRange): Date {
  * Requests are sequenced so a fast range switch cannot be overwritten by a
  * slower, earlier response (last-write-wins on the request id).
  */
-export function useHealthSummary(initialRange: SummaryRange = 'today'): UseHealthSummaryResult {
+export function useHealthSummary(
+  initialRange: SummaryRange = 'today',
+  enabled = true
+): UseHealthSummaryResult {
   const [range, setRange] = useState<SummaryRange>(initialRange);
   const [summary, setSummary] = useState<HealthSummary | null>(null);
   const [loading, setLoading] = useState(false);
@@ -69,9 +72,15 @@ export function useHealthSummary(initialRange: SummaryRange = 'today'): UseHealt
     }
   }, [range]);
 
+  // Auto-load per range, but never before permissions exist (the reads would
+  // only fail and flash an avoidable error banner).
   useEffect(() => {
+    if (!enabled) {
+      setError(null);
+      return;
+    }
     void refresh();
-  }, [refresh]);
+  }, [refresh, enabled]);
 
   return { summary, range, setRange, loading, error, refresh };
 }

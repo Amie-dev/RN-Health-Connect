@@ -6,49 +6,79 @@ A React Native (Expo) application that integrates with Android's **Health Connec
 
 - **Health Connect Integration** — Full read/write access to Android Health Connect APIs
 - **Multi-Record Type Support** — Steps, Weight, Heart Rate, Blood Pressure, Hydration, Calories, Distance, Exercise, Sleep, Blood Glucose, Oxygen Saturation, Body Temperature, Body Fat, Height, and Nutrition
-- **Live Dashboard** — Browse and visualize live health data across categories (Activity, Body, Vitals, Sleep, Nutrition)
-- **Manual Data Entry** — Log health records (steps, weight, heart rate, blood pressure, hydration) directly from the app
-- **Background Sync Engine** — Incremental sync with change tracking, token-based pagination, and recovery mechanisms
-- **Local Database** — Caches health records locally using AsyncStorage for offline access
-- **Permission Management** — Request, check, and revoke Health Connect permissions with granular control
-- **Aggregation & Metrics** — Daily summaries including total steps, calories, latest weight, and average heart rate
-- **Sync Console** — Visual interface to monitor and control the sync process with detailed logging
+- **Live Dashboard** — Browse and visualize live health data across categories (Activity, Body, Vitals, Sleep, Nutrition) with Today / 7-day / 30-day ranges
+- **Manual Data Entry** — Log health records (steps, weight, heart rate, blood pressure, hydration) with validated, idempotent writes
+- **Foreground Sync Engine** — Incremental sync with change tracking, token-based pagination, automatic recovery from expired tokens, and a debounced foreground auto-sync
+- **Local Database** — Caches health records locally using AsyncStorage (batched writes, in-memory mirror, size-capped) for offline access
+- **Permission Management** — Request, check, and revoke Health Connect permissions with live coverage reporting
+- **Aggregation & Metrics** — Range summaries covering steps, active calories, distance, average heart rate, sleep, hydration, and latest weight, each with a raw-record fallback
+- **Sync Console** — Per-record-type cursors, statuses and contextual actions with a run summary
 
 ## Screens & Architecture
 
 ### Dashboard (`src/screens/HealthDashboard.tsx`)
 
-The main screen with three tabs:
+A thin composition shell (~350 lines) around hooks and memoized panels. Three tabs:
 
-- **Explorer** — Browse all local health records with category filters, search, and live Health Connect data
-- **Live** — Read real-time data from Health Connect with 30-day window and record-type selection
-- **Sync Console** — Manage sync operations, view sync states, reset data, and monitor sync logs
+- **Records** — search + category-filtered list of every locally cached record, with expandable raw payloads
+- **Live** — direct read from Health Connect per record type (last 30 days), independent of the local cache
+- **Sync** — per-type cursors and statuses, single-type sync, token recovery, state reset
+
+Shared panels live in `src/components/` (`DashboardHeader`, `TabBar`, `MetricsPanel`,
+`PermissionPanel`, `ExplorerPanel`, `RecordRow`, `LivePanel`, `SyncConsole`, `LogDataModal`)
+with reusable primitives in `src/components/ui.tsx` (banners, chips, pills, animations).
+
+### Behaviour hooks (`src/hooks/`)
+
+| Hook | Purpose |
+|------|---------|
+| `useHealthConnect` | SDK availability, single-flight initialization, permission lifecycle |
+| `useHealthSummary` | Range metrics (today / 7 / 30 days) with stale-response guarding |
+| `useLocalRecords` | Local mirror reads, stats and cache clearing |
+| `useLiveRecords` | Direct Health Connect reads per record type (request-id guarded) |
+| `useSyncEngine` | Sync runs, progress, per-type actions, run summary |
 
 ### Health Connect Layer (`src/health-connect/`)
 
 | File | Purpose |
 |------|---------|
-| `client.ts` | SDK initialization, availability checks, and settings navigation |
-| `permissions.ts` | Request, check, and revoke Health Connect permissions |
-| `records.ts` | Read, write, and delete health records with convenience methods |
-| `changes.ts` | Track data changes for incremental sync |
-| `aggregation.ts` | Aggregate health data into daily summaries |
+| `client.ts` | SDK availability, one-time initialization, settings navigation |
+| `permissions.ts` | Declared permission list, cached grant checks, request/revoke |
+| `records.ts` | Paginated reads (follows `pageToken`), typed inserts with `clientRecordId`, deletes |
+| `changes.ts` | Changes-token creation, bounded `getChanges` pagination |
+| `aggregation.ts` | Metric aggregations (with raw-record fallbacks) and range summaries |
 
 ### Sync Engine (`src/health-connect/sync/`)
 
 | File | Purpose |
 |------|---------|
-| `syncManager.ts` | Orchestrates sync operations across record types |
-| `changeProcessor.ts` | Processes change tokens and fetches updates |
-| `tokenStore.ts` | Manages sync tokens for pagination |
-| `recovery.ts` | Handles sync failure recovery |
+| `syncManager.ts` | Per-type + full-run orchestration, concurrency guards, foreground auto-sync |
+| `changeProcessor.ts` | Deduplicates a page of changes into batched upserts/deletes |
+| `tokenStore.ts` | Changes-token persistence per record type |
+| `recovery.ts` | Re-reads the window since the last successful sync after token expiry |
 
 ### Database (`src/database/`)
 
 | File | Purpose |
 |------|---------|
-| `healthRecords.ts` | Local storage and retrieval of health records |
-| `syncState.ts` | Persists sync state and tokens |
+| `healthRecords.ts` | In-memory mirror + serialized batch writes over AsyncStorage, size-capped |
+| `syncState.ts` | Per-type sync cursors and statuses |
+
+Supporting modules: `src/config.ts` (record-type lists, page/limit constants, package name),
+`src/theme.ts` (design tokens + record catalogue), `src/utils/format.ts` (payload formatters).
+
+### Correctness details
+
+- **Metric keys verified against the native module** — Steps `COUNT_TOTAL`, Active calories
+  `ACTIVE_CALORIES_TOTAL`, Total calories `ENERGY_TOTAL`, Distance `DISTANCE`, Heart rate
+  `BPM_AVG`, Hydration `VOLUME_TOTAL`, Sleep `SLEEP_DURATION_TOTAL`.
+- **Cursor safety** — the changes token only advances after its changes were written; failures
+  keep the old cursor so the window is retried.
+- **Idempotent logging** — manual entries carry a `clientRecordId`, so a double tap overwrites
+  instead of duplicating.
+- **Batched storage** — one read + one `setItem` per sync batch instead of one write per record.
+- **Cache cap** — the local mirror keeps the newest `MAX_LOCAL_RECORDS` (1500) records; Health
+  Connect remains the source of truth.
 
 ## Data Categories
 
@@ -165,10 +195,20 @@ The following Health Connect permissions are requested:
 ## Development Notes
 
 - The app requires a **physical Android device** or **emulator with Google Play Services** and the **Health Connect** app installed
-- On first launch, the app will request Health Connect permissions
+- On first launch, the app requests Health Connect permissions; the dashboard degrades gracefully per missing permission
 - Health Connect must be installed from the Google Play Store (or via system update on Android 14+)
-- The sync engine uses change tokens for efficient incremental data fetching
-- All locally cached data is stored in AsyncStorage and can be cleared from the Sync Console
+- The sync engine uses change tokens for efficient incremental fetching and re-reads the last window when a token expires
+- All locally cached data is stored in AsyncStorage and can be cleared from the Records tab
+- Revoking permissions only takes effect after an app restart (Health Connect platform limitation)
+
+## Scripts
+
+```bash
+npm start        # Metro dev server
+npm run android  # Native debug build on a device/emulator
+npm run ios      # Native debug build (iOS — Health Connect is Android-only)
+npm run typecheck
+```
 
 ## License
 

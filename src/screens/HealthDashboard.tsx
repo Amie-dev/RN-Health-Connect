@@ -1,2027 +1,386 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Alert, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { palette as C, spacing as S } from '../theme';
+import { getRecordMeta } from '../theme';
+import { Banner, EmptyState, LoadingState } from '../components/ui';
+import { DashboardHeader, type ConnectionState } from '../components/DashboardHeader';
+import { TabBar, type TabDefinition, type TabKey } from '../components/TabBar';
+import { MetricsPanel } from '../components/MetricsPanel';
+import { PermissionPanel } from '../components/PermissionPanel';
+import { ExplorerPanel } from '../components/ExplorerPanel';
+import { LivePanel } from '../components/LivePanel';
+import { SyncConsole } from '../components/SyncConsole';
+import { LogDataModal, type LogFormValues } from '../components/LogDataModal';
+import { useHealthConnect } from '../hooks/useHealthConnect';
+import { useHealthSummary } from '../hooks/useHealthSummary';
+import { useLocalRecords } from '../hooks/useLocalRecords';
+import { useLiveRecords } from '../hooks/useLiveRecords';
+import { useSyncEngine } from '../hooks/useSyncEngine';
 import {
-  ActivityIndicator,
-  Alert,
-  Animated,
-  Easing,
-  Modal,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
-} from 'react-native';
-import { SdkAvailabilityStatus, RecordType } from 'react-native-health-connect';
-import {
-  SafeAreaView,
-  SafeAreaProvider,
-  SafeAreaInsetsContext,
-  useSafeAreaInsets,
-} from 'react-native-safe-area-context';
-// Design tokens
-import { palette as C, radius as R, spacing as S } from '../theme';
-
-// Health Connect Services
-import { getClientState, openSettings, openDataManagement } from '../health-connect/client';
-import {
-  requestHealthPermissions,
-  checkHealthPermissions,
-  isPermissionGranted,
-  requestPermissionsForRecord,
-  PermissionStatusResult,
-} from '../health-connect/permissions';
-import {
-  queryHealthRecords,
+  logBloodPressureRecord,
+  logHeartRateRecord,
+  logHydrationRecord,
   logStepsRecord,
   logWeightRecord,
-  logHeartRateRecord,
-  logBloodPressureRecord,
-  logHydrationRecord,
 } from '../health-connect/records';
-import { getTodayHealthSummary } from '../health-connect/aggregation';
-import { SyncManager, DEFAULT_SYNC_RECORD_TYPES, SyncResult } from '../health-connect/sync/syncManager';
-import { SyncRecovery } from '../health-connect/sync/recovery';
+import { POST_WRITE_SYNC_DELAY_MS, SYNC_RECORD_TYPES } from '../config';
+import { SyncManager } from '../health-connect/sync/syncManager';
 
-// Database
-import {
-  getAllLocalHealthRecords,
-  getLocalHealthRecordsByType,
-  clearAllLocalHealthRecords,
-  LocalHealthRecord,
-} from '../database/healthRecords';
-import { getAllSyncStates, HealthConnectSyncState, resetSyncState } from '../database/syncState';
-
-type TabType = 'explorer' | 'live' | 'sync_console';
-type CategoryFilter = 'ALL' | 'Activity' | 'Body' | 'Vitals' | 'Sleep' | 'Nutrition';
-
-/** Record type metadata used across the UI for badges & colors. */
-const RECORD_META: Record<string, { icon: string; color: string; soft: string }> = {
-  Steps: { icon: '🚶', color: C.teal, soft: C.tealSoft },
-  Weight: { icon: '⚖️', color: C.amber, soft: C.amberSoft },
-  HeartRate: { icon: '❤️', color: C.rose, soft: C.roseSoft },
-  BloodPressure: { icon: '🩺', color: C.sky, soft: C.skySoft },
-  Hydration: { icon: '💧', color: C.sky, soft: C.skySoft },
-  ActiveCaloriesBurned: { icon: '🔥', color: C.amber, soft: C.amberSoft },
-  TotalCaloriesBurned: { icon: '🔥', color: C.amber, soft: C.amberSoft },
-  Distance: { icon: '📏', color: C.teal, soft: C.tealSoft },
-  ExerciseSession: { icon: '🏃', color: C.teal, soft: C.tealSoft },
-  SleepSession: { icon: '😴', color: C.violet, soft: C.violetSoft },
-  BloodGlucose: { icon: '🩸', color: C.rose, soft: C.roseSoft },
-  OxygenSaturation: { icon: '🫁', color: C.sky, soft: C.skySoft },
-  BodyTemperature: { icon: '🌡️', color: C.amber, soft: C.amberSoft },
-};
-const getRecordMeta = (type: string) =>
-  RECORD_META[type] || { icon: '📋', color: C.textSecondary, soft: C.surfaceAlt };
-
-type MetricKey = 'steps' | 'activeCalories' | 'latestWeightKg' | 'avgHeartRate';
-type MetricMeta = {
-  key: MetricKey;
-  icon: string;
-  label: string;
-  accent: string;
-  soft: string;
-  unit: string;
-  goal?: number;
-};
-
-const METRIC_META: MetricMeta[] = [
-  { key: 'steps', icon: '🚶', label: 'Steps', accent: C.mint, soft: C.primarySoft, unit: 'steps', goal: 10000 },
-  { key: 'activeCalories', icon: '🔥', label: 'Calories', accent: C.amber, soft: C.amberSoft, unit: 'kcal', goal: 500 },
-  { key: 'latestWeightKg', icon: '⚖️', label: 'Weight', accent: C.sky, soft: C.skySoft, unit: 'kg' },
-  { key: 'avgHeartRate', icon: '❤️', label: 'Heart Rate', accent: C.rose, soft: C.roseSoft, unit: 'avg bpm' },
-];
-
-/** Stable formatters so the animated count-up numbers don't restart on re-render. */
-const METRIC_FORMATTERS: Record<string, (n: number) => string> = {
-  steps: (n) => Math.round(n).toLocaleString(),
-  activeCalories: (n) => `${Math.round(n)}`,
-  latestWeightKg: (n) => n.toFixed(1),
-  avgHeartRate: (n) => `${Math.round(n)}`,
-};
-
-function getGreeting(): string {
-  const h = new Date().getHours();
-  if (h < 12) return 'Good Morning';
-  if (h < 18) return 'Good Afternoon';
-  return 'Good Evening';
-}
-
-/* ────────────────────────────────────────────────────────────────────────────
- * Animation primitives — built on React Native's built-in Animated API so the
- * app feels alive without adding any native dependencies.
- * ──────────────────────────────────────────────────────────────────────────── */
-
-/** Fade + slide-up entrance that plays once when the view mounts. */
-function Reveal({
-  children,
-  delay = 0,
-  duration = 480,
-  style,
-}: {
-  children: React.ReactNode;
-  delay?: number;
-  duration?: number;
-  style?: any;
-}) {
-  const progress = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    const anim = Animated.timing(progress, {
-      toValue: 1,
-      delay,
-      duration,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    });
-    anim.start();
-    return () => anim.stop();
-  }, [progress, delay, duration]);
-
-  return (
-    <Animated.View
-      style={[
-        style,
-        {
-          opacity: progress,
-          transform: [
-            { translateY: progress.interpolate({ inputRange: [0, 1], outputRange: [22, 0] }) },
-          ],
-        },
-      ]}
-    >
-      {children}
-    </Animated.View>
-  );
-}
-
-/** Tactile press feedback: springs down on touch, bounces back on release. */
-function PressableScale({
-  children,
-  onPress,
-  onLongPress,
-  disabled,
-  style,
-  outerStyle,
-  scaleTo = 0.955,
-}: {
-  children: React.ReactNode;
-  onPress?: () => void;
-  onLongPress?: () => void;
-  disabled?: boolean;
-  style?: any;
-  outerStyle?: any;
-  scaleTo?: number;
-}) {
-  const scale = useRef(new Animated.Value(1)).current;
-
-  const pressIn = () =>
-    Animated.spring(scale, { toValue: scaleTo, useNativeDriver: true, speed: 40, bounciness: 4 }).start();
-  const pressOut = () =>
-    Animated.spring(scale, { toValue: 1, useNativeDriver: true, speed: 22, bounciness: 7 }).start();
-
-  return (
-    <Pressable
-      onPress={onPress}
-      onLongPress={onLongPress}
-      disabled={disabled}
-      onPressIn={pressIn}
-      onPressOut={pressOut}
-      style={outerStyle}
-    >
-      <Animated.View style={[style, { transform: [{ scale }] }]}>{children}</Animated.View>
-    </Pressable>
-  );
-}
-
-/** Endless breathing pulse — used for the live heart avatar and LIVE badge. */
-function Pulse({
-  children,
-  minScale = 1,
-  maxScale = 1.15,
-  duration = 1300,
-  style,
-}: {
-  children: React.ReactNode;
-  minScale?: number;
-  maxScale?: number;
-  duration?: number;
-  style?: any;
-}) {
-  const pulse = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulse, {
-          toValue: 1,
-          duration: duration * 0.42,
-          easing: Easing.inOut(Easing.quad),
-          useNativeDriver: true,
-        }),
-        Animated.timing(pulse, {
-          toValue: 0,
-          duration: duration * 0.58,
-          easing: Easing.inOut(Easing.quad),
-          useNativeDriver: true,
-        }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [pulse, duration]);
-
-  return (
-    <Animated.View
-      style={[
-        style,
-        {
-          transform: [
-            { scale: pulse.interpolate({ inputRange: [0, 1], outputRange: [minScale, maxScale] }) },
-          ],
-        },
-      ]}
-    >
-      {children}
-    </Animated.View>
-  );
-}
-
-/** Number that counts up (and re-counts) whenever its value changes. */
-function CountUp({
-  value,
-  format,
-  duration = 950,
-  style,
-}: {
-  value: number | null;
-  format: (n: number) => string;
-  duration?: number;
-  style?: any;
-}) {
-  const isInvalid = value == null || typeof value !== 'number' || isNaN(value);
-  const [text, setText] = useState(() => (isInvalid ? '--' : format(value!)));
-  const anim = useRef(new Animated.Value(1)).current;
-  const prevRef = useRef<number | null>(isInvalid ? null : value);
-
-  useEffect(() => {
-    if (value == null || typeof value !== 'number' || isNaN(value)) {
-      prevRef.current = null;
-      setText('--');
-      return;
-    }
-    const from =
-      prevRef.current != null && typeof prevRef.current === 'number' && !isNaN(prevRef.current)
-        ? prevRef.current
-        : 0;
-    prevRef.current = value;
-    if (from === value) {
-      setText(format(value));
-      return;
-    }
-    anim.setValue(0);
-    const listenerId = anim.addListener(({ value: t }) => {
-      const current = from + (value - from) * t;
-      setText(isNaN(current) ? '--' : format(current));
-    });
-    const timer = Animated.timing(anim, {
-      toValue: 1,
-      duration,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: false,
-    });
-    timer.start();
-    return () => {
-      anim.removeListener(listenerId);
-      timer.stop();
-    };
-  }, [value, format, duration, anim]);
-
-  return (
-    <Text style={style} numberOfLines={1}>
-      {text}
-    </Text>
-  );
-}
-
-/** Goal progress bar that eases to its target width whenever `pct` changes. */
-function GoalBar({ pct, color, track }: { pct: number; color: string; track: string }) {
-  const progress = useRef(new Animated.Value(0)).current;
-  const target = Math.max(0, Math.min(100, pct));
-
-  useEffect(() => {
-    const anim = Animated.timing(progress, {
-      toValue: target,
-      duration: 1100,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: false,
-    });
-    anim.start();
-    return () => anim.stop();
-  }, [target, progress]);
-
-  return (
-    <View style={[styles.barTrack, { backgroundColor: track }]}>
-      <Animated.View
-        style={[
-          styles.barFill,
-          {
-            backgroundColor: color,
-            width: progress.interpolate({ inputRange: [0, 100], outputRange: ['0%', '100%'] }),
-          },
-        ]}
-      />
-    </View>
-  );
-}
-
-/** Spins its children in an endless loop while `spinning` is true. */
-function Spin({ children, spinning }: { children: React.ReactNode; spinning: boolean }) {
-  const rot = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    if (!spinning) return;
-    const loop = Animated.loop(
-      Animated.timing(rot, {
-        toValue: 1,
-        duration: 850,
-        easing: Easing.linear,
-        useNativeDriver: true,
-      })
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [spinning, rot]);
-
-  if (!spinning) return <>{children}</>;
-
-  return (
-    <Animated.View
-      style={{
-        transform: [{ rotate: rot.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] }) }],
-      }}
-    >
-      {children}
-    </Animated.View>
-  );
-}
-
-/** Tab with a spring-in emerald pill behind the label. */
-function TabButton({
-  active,
-  label,
-  onPress,
-}: {
-  active: boolean;
-  label: string;
-  onPress: () => void;
-}) {
-  const glow = useRef(new Animated.Value(active ? 1 : 0)).current;
-
-  useEffect(() => {
-    Animated.spring(glow, {
-      toValue: active ? 1 : 0,
-      useNativeDriver: true,
-      speed: 28,
-      bounciness: 5,
-    }).start();
-  }, [active, glow]);
-
-  return (
-    <Pressable onPress={onPress} style={styles.tabItem}>
-      <Animated.View
-        style={[
-          styles.tabPill,
-          {
-            opacity: glow,
-            transform: [{ scale: glow.interpolate({ inputRange: [0, 1], outputRange: [0.8, 1] }) }],
-          },
-        ]}
-      />
-      <Text style={[styles.tabText, active && styles.tabTextActive]}>{label}</Text>
-    </Pressable>
-  );
-}
-
+/**
+ * Dashboard screen.
+ *
+ * Composition only — every behaviour lives in a hook (`useHealthConnect`,
+ * `useHealthSummary`, `useLocalRecords`, `useLiveRecords`, `useSyncEngine`) and
+ * every visual block is a memoized component under `src/components/`.
+ */
 export default function HealthDashboard() {
-  // SDK & Permission state
-  const [sdkStatus, setSdkStatus] = useState<number | null>(null);
-  const [initialized, setInitialized] = useState(false);
-  const [permissionInfo, setPermissionInfo] = useState<PermissionStatusResult | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [syncing, setSyncing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const health = useHealthConnect();
+  const summary = useHealthSummary('today', health.grantedCount > 0);
+  const localRecords = useLocalRecords();
+  const live = useLiveRecords('Steps', 30, health.grantedCount > 0);
+  const engine = useSyncEngine();
 
-  // Today Summary Metrics
-  const [todaySummary, setTodaySummary] = useState({
-    steps: 0,
-    activeCalories: 0,
-    distanceKm: 0,
-    avgHeartRate: null as number | null,
-    latestWeightKg: null as number | null,
-  });
+  const [activeTab, setActiveTab] = useState<TabKey>('explorer');
+  const [logModalOpen, setLogModalOpen] = useState(false);
+  const [savingRecord, setSavingRecord] = useState(false);
+  const [notice, setNotice] = useState<{ tone: 'success' | 'error' | 'info'; text: string } | null>(
+    null
+  );
 
-  // UI state
-  const [activeTab, setActiveTab] = useState<TabType>('explorer');
-  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('ALL');
-  const [expandedRecordId, setExpandedRecordId] = useState<string | null>(null);
-  const [selectedLiveRecordType, setSelectedLiveRecordType] = useState<RecordType>('Steps');
+  const ready = health.phase === 'ready' && health.initialized;
+  const hasAnyPermission = health.grantedCount > 0;
 
-  // Local DB & Sync Console data
-  const [localRecords, setLocalRecords] = useState<LocalHealthRecord[]>([]);
-  const [liveHCRecords, setLiveHCRecords] = useState<any[]>([]);
-  const [syncStates, setSyncStates] = useState<Record<string, HealthConnectSyncState>>({});
-
-  // Data Entry Modal
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [logType, setLogType] = useState<'Steps' | 'Weight' | 'HeartRate' | 'BloodPressure' | 'Hydration'>('Steps');
-  const [inputVal1, setInputVal1] = useState('');
-  const [inputVal2, setInputVal2] = useState('');
-
-  /**
-   * Refreshes summary metrics, local DB records, and sync console states
-   */
-  const refreshAllData = useCallback(async (liveType: RecordType = selectedLiveRecordType) => {
-    try {
-      // 1. Fetch Today Summary Aggregations
-      const summary = await getTodayHealthSummary();
-
-      // Fetch latest weight from past 30 days
-      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-      const weightRes = await queryHealthRecords('Weight', {
-        timeRangeFilter: {
-          operator: 'between',
-          startTime: thirtyDaysAgo,
-          endTime: new Date().toISOString(),
-        },
-        pageSize: 1,
-        ascendingOrder: false,
-      });
-      const latestWeight = weightRes.records[0]?.weight?.inKilograms ?? weightRes.records[0]?.weight?.value ?? null;
-
-      setTodaySummary((prev) => ({
-        ...summary,
-        latestWeightKg: latestWeight ?? prev.latestWeightKg,
-      }));
-
-      // 2. Load Local Database Records
-      const dbRecords = await getAllLocalHealthRecords();
-      setLocalRecords(dbRecords);
-
-      // 3. Load Sync Console States
-      const states = await getAllSyncStates();
-      setSyncStates(states);
-
-      // 4. Fetch Live Records sample for selected record type
-      const liveRes = await queryHealthRecords(liveType, {
-        timeRangeFilter: {
-          operator: 'between',
-          startTime: thirtyDaysAgo,
-          endTime: new Date().toISOString(),
-        },
-        pageSize: 50,
-      });
-      setLiveHCRecords(liveRes.records || []);
-    } catch (err: any) {
-      console.error('[Dashboard] Refresh error:', err);
-    }
-  }, [selectedLiveRecordType]);
-
-  /**
-   * Initializes SDK & checks permissions
-   */
-  const initApp = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const client = await getClientState();
-      setSdkStatus(client.status);
-      setInitialized(client.initialized);
-
-      if (client.status !== SdkAvailabilityStatus.SDK_AVAILABLE) {
-        setError(client.message);
-        setLoading(false);
-        return;
-      }
-
-      const permStatus = await checkHealthPermissions();
-      setPermissionInfo(permStatus);
-
-      if (permStatus.grantedPermissions.length > 0) {
-        await SyncManager.syncAll(DEFAULT_SYNC_RECORD_TYPES);
-        await refreshAllData();
-      }
-    } catch (err: any) {
-      console.error('[Dashboard] Init error:', err);
-      setError(err?.message || 'Failed to initialize Health Connect dashboard');
-    } finally {
-      setLoading(false);
-    }
-  }, [refreshAllData]);
-
-  /**
-   * Trigger Manual Permission Request
-   */
-  const handleRequestPermissions = async () => {
-    setLoading(true);
-    try {
-      await requestHealthPermissions();
-      const permStatus = await checkHealthPermissions();
-      setPermissionInfo(permStatus);
-      if (permStatus.grantedPermissions.length > 0) {
-        await SyncManager.syncAll(DEFAULT_SYNC_RECORD_TYPES);
-        await refreshAllData();
-      }
-    } catch (err: any) {
-      Alert.alert('Permission Error', err?.message || String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  /**
-   * Trigger Incremental Sync via SyncManager
-   */
-  const handleRunSync = async () => {
-    setSyncing(true);
-    try {
-      const results: SyncResult[] = await SyncManager.syncAll(DEFAULT_SYNC_RECORD_TYPES);
-      const totalUpserts = results.reduce((acc, r) => acc + r.upsertedCount, 0);
-      const totalDeletes = results.reduce((acc, r) => acc + r.deletedCount, 0);
-
-      await refreshAllData();
-      Alert.alert(
-        'Sync Complete',
-        `Processed ${results.length} record types.\nUpserts: ${totalUpserts} | Deletes: ${totalDeletes}`
-      );
-    } catch (err: any) {
-      Alert.alert('Sync Error', err?.message || String(err));
-    } finally {
-      setSyncing(false);
-    }
-  };
-
-  /**
-   * Test 30-day Token Expiration Recovery
-   */
-  const handleTestTokenRecovery = async (recordType: RecordType = 'Steps') => {
-    setLoading(true);
-    try {
-      await SyncRecovery.recoverFromExpiredToken(recordType);
-      await refreshAllData();
-      Alert.alert('Recovery Complete', `Simulated 30-day recovery sync successfully executed for ${recordType}.`);
-    } catch (err: any) {
-      Alert.alert('Recovery Error', err?.message || String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-
-  /**
-   * Log New Health Data into Health Connect
-   */
-  const handleSaveNewData = async () => {
-    const val1 = parseFloat(inputVal1);
-    const val2 = parseFloat(inputVal2);
-
-    if (isNaN(val1) || val1 <= 0) {
-      Alert.alert('Validation Error', 'Please enter a valid numeric value.');
-      return;
-    }
-
-    setLoading(true);
-    try {
-      // Check write permission before inserting
-      const granted = permissionInfo?.grantedPermissions || [];
-      const hasWrite = isPermissionGranted(granted, logType, 'write');
-
-      if (!hasWrite) {
-        console.log(`[Dashboard] Write permission missing for ${logType}. Requesting permission...`);
-        try {
-          await requestPermissionsForRecord(logType, ['read', 'write']);
-          const updatedPerms = await checkHealthPermissions();
-          setPermissionInfo(updatedPerms);
-        } catch (permErr) {
-          console.warn('[Dashboard] Write permission prompt closed or denied:', permErr);
-        }
-      }
-
-      const now = new Date().toISOString();
-      const oneHourAgo = new Date(Date.now() - 3600 * 1000).toISOString();
-
-      if (logType === 'Steps') {
-        await logStepsRecord(Math.round(val1), oneHourAgo, now);
-      } else if (logType === 'Weight') {
-        await logWeightRecord(val1, now);
-      } else if (logType === 'HeartRate') {
-        await logHeartRateRecord(Math.round(val1), now);
-      } else if (logType === 'BloodPressure') {
-        if (isNaN(val2) || val2 <= 0) {
-          Alert.alert('Validation Error', 'Please enter valid Diastolic pressure.');
-          setLoading(false);
-          return;
-        }
-        await logBloodPressureRecord(Math.round(val1), Math.round(val2), now);
-      } else if (logType === 'Hydration') {
-        await logHydrationRecord(val1, oneHourAgo, now);
-      }
-
-      setIsModalOpen(false);
-      setInputVal1('');
-      setInputVal2('');
-      Alert.alert('Success', `${logType} record saved to Health Connect!`);
-
-      // Sync changes into local database immediately
-      await SyncManager.syncRecordType(logType);
-      await refreshAllData();
-    } catch (err: any) {
-      Alert.alert('Insert Error', err?.message || String(err));
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleClearLocalDB = async () => {
-    Alert.alert('Clear Local Database', 'Are you sure you want to clear all synced local records?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Clear',
-        style: 'destructive',
-        onPress: async () => {
-          await clearAllLocalHealthRecords();
-          await resetSyncState();
-          await refreshAllData();
-        },
-      },
-    ]);
-  };
-
-  // Register foreground lifecycle auto-sync on mount
+  // ── Initial bootstrap: one full sync + local read once permissions exist ──
   useEffect(() => {
-    initApp();
-    const unsubscribe = SyncManager.setupForegroundAutoSync(DEFAULT_SYNC_RECORD_TYPES, () => {
-      refreshAllData();
+    if (!ready || !hasAnyPermission) return;
+    let cancelled = false;
+
+    (async () => {
+      await engine.runSync(SYNC_RECORD_TYPES);
+      if (!cancelled) await localRecords.refresh();
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // Bootstrap must only run when readiness flips, not on every engine tick.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, hasAnyPermission]);
+
+  // ── Foreground auto-sync (debounced inside the engine) ───────────────────
+  const engineRef = useRef(engine);
+  engineRef.current = engine;
+
+  useEffect(() => {
+    if (!ready || !hasAnyPermission) return undefined;
+
+    const unsubscribe = SyncManager.setupForegroundAutoSync(SYNC_RECORD_TYPES, (result) => {
+      if (result.upsertedCount > 0 || result.deletedCount > 0) {
+        void engineRef.current.refreshStates();
+        void localRecords.refresh();
+        void summary.refresh();
+      }
     });
-    return () => unsubscribe();
-  }, [initApp, refreshAllData]);
+    return unsubscribe;
+    // Hooks are read through a ref; registration depends on readiness only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, hasAnyPermission]);
 
+  const handleRefresh = useCallback(async () => {
+    setNotice(null);
+    await Promise.all([summary.refresh(), localRecords.refresh(), engine.refreshStates()]);
+  }, [summary, localRecords, engine]);
 
-  // Filter records by category
-  const filteredLocalRecords = localRecords.filter((rec: LocalHealthRecord) => {
-    if (categoryFilter === 'ALL') return true;
-    if (categoryFilter === 'Activity')
-      return ['Steps', 'ActiveCaloriesBurned', 'TotalCaloriesBurned', 'Distance', 'ExerciseSession'].includes(
-        rec.recordType
-      );
-    if (categoryFilter === 'Body') return ['Weight', 'Height', 'BodyFat', 'Bmi'].includes(rec.recordType);
-    if (categoryFilter === 'Vitals')
-      return [
-        'HeartRate',
-        'BloodPressure',
-        'BloodGlucose',
-        'OxygenSaturation',
-        'BodyTemperature',
-      ].includes(rec.recordType);
-    if (categoryFilter === 'Sleep') return ['SleepSession'].includes(rec.recordType);
-    if (categoryFilter === 'Nutrition') return ['Hydration', 'Nutrition'].includes(rec.recordType);
-    return true;
-  });
-
-  /** Raw numeric values for the animated summary grid (CountUp handles formatting). */
-  const metricValues: Record<string, number | null> = {
-    steps: todaySummary.steps,
-    activeCalories: todaySummary.activeCalories,
-    latestWeightKg: todaySummary.latestWeightKg,
-    avgHeartRate: todaySummary.avgHeartRate,
-  };
-
-  /** Payload summary line for a local record. */
-  const payloadSummaryText = (item: LocalHealthRecord): string => {
-    if (item.recordType === 'Steps') return `Count: ${item.payload.count ?? item.payload.records?.[0]?.count ?? '--'}`;
-    if (item.recordType === 'Weight') return `${item.payload.weight?.inKilograms ?? item.payload.weight?.value ?? '--'} kg`;
-    if (item.recordType === 'HeartRate') return `${item.payload.samples?.[0]?.beatsPerMinute ?? item.payload.beatsPerMinute ?? '--'} bpm`;
-    if (item.recordType === 'BloodPressure')
-      return `${item.payload.systolic?.inMillimetersOfMercury ?? item.payload.systolic?.value ?? '--'} / ${item.payload.diastolic?.inMillimetersOfMercury ?? item.payload.diastolic?.value ?? '--'} mmHg`;
-    if (item.recordType === 'Hydration') return `${item.payload.volume?.inLiters ?? item.payload.volume?.value ?? '--'} L`;
-    if (item.recordType === 'ActiveCaloriesBurned' || item.recordType === 'TotalCaloriesBurned') {
-      const energy = item.payload.energy;
-      const kcal = typeof energy === 'object' ? (energy?.inKilocalories ?? energy?.inCalories ?? energy?.value) : energy;
-      return `${kcal != null && !isNaN(Number(kcal)) ? Math.round(Number(kcal)) : '--'} kcal`;
+  const handleRunSync = useCallback(async () => {
+    setNotice(null);
+    const result = await engine.runSync();
+    if (result.failureCount > 0) {
+      setNotice({
+        tone: 'error',
+        text: `Sync finished with ${result.failureCount} failure(s): ${result.upsertedCount} updated, ${result.deletedCount} removed.`,
+      });
+    } else if (result.skippedCount > 0) {
+      setNotice({
+        tone: 'info',
+        text: `${result.skippedCount} record type(s) skipped — grant access in the Sync tab.`,
+      });
+    } else {
+      setNotice({
+        tone: 'success',
+        text: `Sync complete: ${result.upsertedCount} updated, ${result.deletedCount} removed in ${(result.durationMs / 1000).toFixed(1)}s.`,
+      });
     }
-    if (item.recordType === 'Distance') return `${item.payload.distance?.inKilometers ?? item.payload.distance?.value ?? '--'} km`;
-    if (item.recordType === 'SleepSession') return `Title: ${item.payload.title || 'Sleep Session'}`;
-    return JSON.stringify(item.payload).substring(0, 45);
-  };
+  }, [engine]);
 
-  const formatLiveRecordSummary = (rec: any, type: string): string => {
-    if (type === 'Steps') return `Count: ${rec.count ?? '--'}`;
-    if (type === 'Weight') return `Weight: ${rec.weight?.inKilograms ?? rec.weight?.value ?? '--'} kg`;
-    if (type === 'HeartRate') return `BPM: ${rec.samples?.[0]?.beatsPerMinute ?? rec.beatsPerMinute ?? '--'}`;
-    if (type === 'BloodPressure')
-      return `BP: ${rec.systolic?.inMillimetersOfMercury ?? '--'} / ${rec.diastolic?.inMillimetersOfMercury ?? '--'} mmHg`;
-    if (type === 'Hydration') return `Volume: ${rec.volume?.inLiters ?? rec.volume?.value ?? '--'} L`;
-    if (type === 'ActiveCaloriesBurned' || type === 'TotalCaloriesBurned') {
-      const energy = rec.energy;
-      const kcal = typeof energy === 'object' ? (energy?.inKilocalories ?? energy?.inCalories ?? energy?.value) : energy;
-      return `Energy: ${kcal != null && !isNaN(Number(kcal)) ? Math.round(Number(kcal)) : '--'} kcal`;
-    }
-    if (type === 'SleepSession') return `Title: ${rec.title || 'Sleep Session'}`;
-    return JSON.stringify(rec).substring(0, 45);
-  };
+  const handleSaveRecord = useCallback(
+    async (values: LogFormValues) => {
+      setSavingRecord(true);
+      setNotice(null);
+      try {
+        const now = new Date().toISOString();
+        const oneHourAgo = new Date(Date.now() - 3_600_000).toISOString();
 
-  const isHcAvailable = sdkStatus === SdkAvailabilityStatus.SDK_AVAILABLE;
+        // Ask for the missing write permission first (one native dialog).
+        if (!health.hasPermission(values.recordType, 'write')) {
+          const status = await health.requestForRecord(values.recordType, ['read', 'write']);
+          const grantedNow = status.granted.some(
+            (permission) =>
+              permission.recordType === values.recordType && permission.accessType === 'write'
+          );
+          if (!grantedNow) {
+            setNotice({
+              tone: 'error',
+              text: `Write access for ${getRecordMeta(values.recordType).label} was not granted.`,
+            });
+            return;
+          }
+        }
 
+        switch (values.recordType) {
+          case 'Steps':
+            await logStepsRecord(values.value1, oneHourAgo, now);
+            break;
+          case 'Weight':
+            await logWeightRecord(values.value1, now);
+            break;
+          case 'HeartRate':
+            await logHeartRateRecord(values.value1, now);
+            break;
+          case 'BloodPressure':
+            await logBloodPressureRecord(values.value1, values.value2 ?? 0, now);
+            break;
+          case 'Hydration':
+            await logHydrationRecord(values.value1, oneHourAgo, now);
+            break;
+        }
 
-  return (
-    <SafeAreaView style={styles.safeArea}>
-      <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
-        {/* Hero Header */}
-        <Reveal>
-          <View style={styles.hero}>
-            <View style={styles.heroTopRow}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.greeting}>{getGreeting()} 👋</Text>
-                <Text style={styles.heroTitle}>Health Connect</Text>
-                <Text style={styles.heroSubtitle}>
-                  {new Date().toLocaleDateString([], {
-                    weekday: 'long',
-                    month: 'long',
-                    day: 'numeric',
-                  })}
-                </Text>
-              </View>
-              <View style={styles.heroAvatar}>
-                <Pulse minScale={1} maxScale={1.16} duration={1400}>
-                  <Text style={styles.heroAvatarIcon}>🫀</Text>
-                </Pulse>
-              </View>
-            </View>
-          </View>
-        </Reveal>
+        setLogModalOpen(false);
+        setNotice({
+          tone: 'success',
+          text: `${getRecordMeta(values.recordType).label} saved to Health Connect.`,
+        });
 
-        {/* Status Card */}
-        <Reveal delay={90}>
-          <View style={styles.statusCard}>
-            <View style={styles.statusItem}>
-              {isHcAvailable ? (
-                <Pulse minScale={1} maxScale={1.7} duration={1100}>
-                  <View style={[styles.statusDot, styles.dotGreen]} />
-                </Pulse>
-              ) : (
-                <View style={[styles.statusDot, styles.dotRed]} />
-              )}
-              <Text style={styles.statusItemText}>SDK {isHcAvailable ? 'Available' : 'Unavailable'}</Text>
-            </View>
-            <View style={[styles.statusItem, styles.statusItemBordered]}>
-              <View style={[styles.statusDot, initialized ? styles.dotGreen : styles.dotAmber]} />
-              <Text style={styles.statusItemText}>{initialized ? 'Initialized' : 'Not Initialized'}</Text>
-            </View>
-            <View style={[styles.statusItem, styles.statusItemBordered]}>
-              <View
-                style={[styles.statusDot, permissionInfo?.hasAll ? styles.dotGreen : styles.dotAmber]}
-              />
-              <Text style={styles.statusItemText}>
-                {permissionInfo?.hasAll
-                  ? 'All Permissions'
-                  : `${permissionInfo?.grantedPermissions.length || 0} Permissions`}
-              </Text>
-            </View>
-          </View>
-        </Reveal>
-
-        {/* Quick Links */}
-        <Reveal delay={150}>
-          <View style={styles.quickLinksRow}>
-            <PressableScale outerStyle={{ flex: 1 }} style={styles.quickLink} onPress={openSettings}>
-              <Text style={styles.quickLinkIcon}>⚙️</Text>
-              <Text style={styles.quickLinkText}>System Settings</Text>
-            </PressableScale>
-            <PressableScale
-              outerStyle={{ flex: 1 }}
-              style={styles.quickLink}
-              onPress={() => openDataManagement()}
-            >
-              <Text style={styles.quickLinkIcon}>🗂️</Text>
-              <Text style={styles.quickLinkText}>Manage Data</Text>
-            </PressableScale>
-          </View>
-        </Reveal>
-
-        {/* Error Notification */}
-        {error && (
-          <Reveal delay={120}>
-            <View style={styles.errorBox}>
-              <Text style={styles.errorIcon}>⚠️</Text>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.errorTitle}>Something needs attention</Text>
-                <Text style={styles.errorText}>{error}</Text>
-              </View>
-            </View>
-          </Reveal>
-        )}
-
-        {/* Today Summary Metrics Grid */}
-        <View style={styles.sectionHeaderRow}>
-          <Text style={styles.sectionTitle}>Today's Metrics</Text>
-          <View style={styles.sectionBadge}>
-            <Pulse minScale={1} maxScale={1.5} duration={1200}>
-              <View style={styles.liveDot} />
-            </Pulse>
-            <Text style={styles.sectionBadgeText}>LIVE</Text>
-          </View>
-        </View>
-        <View style={styles.metricsGrid}>
-          {METRIC_META.map((m, index) => {
-            const raw = metricValues[m.key] ?? null;
-            const pct = m.goal && raw != null ? Math.min(100, (raw / m.goal) * 100) : null;
-            return (
-              <Reveal key={m.key} delay={220 + index * 90} style={styles.metricCardWrap}>
-                <View style={styles.metricCard}>
-                  <View style={[styles.metricIconWrap, { backgroundColor: m.soft }]}>
-                    <Text style={styles.metricIcon}>{m.icon}</Text>
-                  </View>
-                  <Text style={styles.metricLabel}>{m.label}</Text>
-                  <CountUp
-                    value={raw}
-                    format={METRIC_FORMATTERS[m.key]}
-                    style={[styles.metricValue, { color: m.accent }]}
-                  />
-                  <Text style={styles.metricUnit}>{m.unit}</Text>
-                  {pct != null && <GoalBar pct={pct} color={m.accent} track={C.surfaceAlt} />}
-                  {pct != null && (
-                    <Text style={styles.metricGoal}>
-                      {Math.round(pct)}% of {m.goal?.toLocaleString()} {m.unit}
-                    </Text>
-                  )}
-                </View>
-              </Reveal>
+        // Echo the write into the local mirror after the platform settles,
+        // then refresh whatever is on screen.
+        setTimeout(() => {
+          void engine
+            .runSingle(values.recordType)
+            .then(() => Promise.all([summary.refresh(), localRecords.refresh()]))
+            .catch((caught) =>
+              console.warn('[Dashboard] Post-write sync failed:', caught)
             );
-          })}
-        </View>
+        }, POST_WRITE_SYNC_DELAY_MS);
+      } catch (caught) {
+        const text = caught instanceof Error ? caught.message : String(caught);
+        setNotice({ tone: 'error', text });
+      } finally {
+        setSavingRecord(false);
+      }
+    },
+    [health, engine, summary, localRecords]
+  );
 
-        {/* Action Controls */}
-        <Reveal delay={580}>
-          <View style={styles.actionRow}>
-            {!permissionInfo?.hasAll && (
-              <PressableScale
-                outerStyle={{ flexGrow: 1 }}
-                style={[styles.actionButton, styles.actionPrimary]}
-                onPress={handleRequestPermissions}
-                disabled={loading}
-              >
-                {loading ? (
-                  <ActivityIndicator color="#052E1F" size="small" />
-                ) : (
-                  <>
-                    <Text style={styles.actionIcon}>🔐</Text>
-                    <Text style={styles.actionText}>Grant Access</Text>
-                  </>
-                )}
-              </PressableScale>
-            )}
-
-            <PressableScale
-              outerStyle={{ flexGrow: 1 }}
-              style={[styles.actionButton, styles.actionSync]}
-              onPress={handleRunSync}
-              disabled={syncing || loading}
-            >
-              {syncing ? (
-                <>
-                  <Spin spinning>
-                    <Text style={styles.actionIcon}>🔄</Text>
-                  </Spin>
-                  <Text style={styles.actionText}>Syncing…</Text>
-                </>
-              ) : (
-                <>
-                  <Text style={styles.actionIcon}>🔄</Text>
-                  <Text style={styles.actionText}>Sync Now</Text>
-                </>
-              )}
-            </PressableScale>
-
-            <PressableScale
-              outerStyle={{ flexGrow: 1 }}
-              style={[styles.actionButton, styles.actionSecondary]}
-              onPress={() => setIsModalOpen(true)}
-              disabled={loading}
-            >
-              <Text style={styles.actionIcon}>➕</Text>
-              <Text style={styles.actionSecondaryText}>Log Data</Text>
-            </PressableScale>
-          </View>
-        </Reveal>
-
-        {/* Main Content Navigation Tabs */}
-        <View style={styles.tabBar}>
-          {(
-            [
-              { key: 'explorer', label: 'Synced DB', count: localRecords.length },
-              { key: 'live', label: 'Live API' },
-              { key: 'sync_console', label: 'Sync Console' },
-            ] as { key: TabType; label: string; count?: number }[]
-          ).map((tab) => (
-            <TabButton
-              key={tab.key}
-              active={activeTab === tab.key}
-              label={`${tab.label}${tab.count !== undefined ? ` (${tab.count})` : ''}`}
-              onPress={() => setActiveTab(tab.key)}
-            />
-          ))}
-        </View>
-
-
-        {/* TAB 1: Synced DB Explorer */}
-        {activeTab === 'explorer' && (
-          <View style={styles.tabContent}>
-            {/* Category Filter Pills */}
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterBar}>
-              {(['ALL', 'Activity', 'Body', 'Vitals', 'Sleep', 'Nutrition'] as CategoryFilter[]).map(
-                (cat) => (
-                  <TouchableOpacity
-                    key={cat}
-                    style={[styles.chip, categoryFilter === cat && styles.chipActive]}
-                    onPress={() => setCategoryFilter(cat)}
-                  >
-                    <Text style={[styles.chipText, categoryFilter === cat && styles.chipTextActive]}>
-                      {cat}
-                    </Text>
-                  </TouchableOpacity>
-                )
-              )}
-            </ScrollView>
-
-            <View style={styles.explorerHeaderRow}>
-              <Text style={styles.explorerTitle}>
-                Synced Records <Text style={styles.explorerCount}>{filteredLocalRecords.length}</Text>
-              </Text>
-              <TouchableOpacity style={styles.dangerLink} onPress={handleClearLocalDB}>
-                <Text style={styles.dangerLinkText}>Clear Local DB</Text>
-              </TouchableOpacity>
-            </View>
-
-            {filteredLocalRecords.length === 0 ? (
-              <View style={styles.emptyState}>
-                <Text style={styles.emptyIcon}>📭</Text>
-                <Text style={styles.emptyTitle}>No records here yet</Text>
-                <Text style={styles.emptySubText}>
-                  Tap "Sync Now" above to pull the latest records from Health Connect into your local
-                  database.
-                </Text>
-              </View>
-            ) : (
-              filteredLocalRecords.map((item: LocalHealthRecord) => {
-                const isExpanded = expandedRecordId === item.localId;
-                const meta = getRecordMeta(item.recordType);
-                return (
-                  <TouchableOpacity
-                    key={item.localId}
-                    style={styles.recordCard}
-                    onPress={() => setExpandedRecordId(isExpanded ? null : item.localId)}
-                  >
-                    <View style={styles.recordTopRow}>
-                      <View style={[styles.recordIconWrap, { backgroundColor: meta.soft }]}>
-                        <Text style={styles.recordIcon}>{meta.icon}</Text>
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <View style={styles.recordHeader}>
-                          <Text style={[styles.recordType, { color: meta.color }]}>{item.recordType}</Text>
-                          <Text style={styles.recordTime}>
-                            {new Date(item.startTime || item.time || item.createdAt).toLocaleTimeString([], {
-                              hour: '2-digit',
-                              minute: '2-digit',
-                            })}
-                          </Text>
-                        </View>
-                        <Text style={styles.payloadSummary} numberOfLines={1}>
-                          {payloadSummaryText(item)}
-                        </Text>
-                      </View>
-                      <Text style={[styles.chevron, isExpanded && styles.chevronOpen]}>{'›'}</Text>
-                    </View>
-
-                    {isExpanded && (
-                      <View style={styles.expandedBox}>
-                        {item.dataOrigin && (
-                          <Text style={styles.recordOrigin}>Origin: {item.dataOrigin}</Text>
-                        )}
-                        <Text style={styles.recordHcId} numberOfLines={1}>
-                          HC ID: {item.healthConnectId}
-                        </Text>
-                        <View style={styles.jsonBox}>
-                          <Text style={styles.jsonText}>{JSON.stringify(item.payload, null, 2)}</Text>
-                        </View>
-                      </View>
-                    )}
-                  </TouchableOpacity>
-                );
-              })
-            )}
-          </View>
-        )}
-
-
-        {/* TAB 2: Direct Live HC Query */}
-        {activeTab === 'live' && (
-          <View style={styles.tabContent}>
-            {/* Live Record Type Chips */}
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterBar}>
-              {(['Steps', 'Weight', 'HeartRate', 'BloodPressure', 'Hydration', 'ActiveCaloriesBurned', 'SleepSession'] as RecordType[]).map(
-                (recType) => {
-                  const active = selectedLiveRecordType === recType;
-                  return (
-                    <TouchableOpacity
-                      key={recType}
-                      style={[styles.chip, active && styles.chipActive]}
-                      onPress={() => {
-                        setSelectedLiveRecordType(recType);
-                        refreshAllData(recType);
-                      }}
-                    >
-                      <Text style={[styles.chipText, active && styles.chipTextActive]}>
-                        {getRecordMeta(recType).icon} {recType}
-                      </Text>
-                    </TouchableOpacity>
-                  );
-                }
-              )}
-            </ScrollView>
-
-            <View style={styles.explorerHeaderRow}>
-              <Text style={styles.explorerTitle}>
-                Live Read — {selectedLiveRecordType}{' '}
-                <Text style={styles.explorerCount}>{liveHCRecords.length}</Text>
-              </Text>
-              <View style={[styles.recordTag, { backgroundColor: getRecordMeta(selectedLiveRecordType).soft }]}>
-                <Text style={[styles.recordTagText, { color: getRecordMeta(selectedLiveRecordType).color }]}>
-                  Last 30 Days
-                </Text>
-              </View>
-            </View>
-
-            {liveHCRecords.length === 0 ? (
-              <View style={styles.emptyState}>
-                <Text style={styles.emptyIcon}>📡</Text>
-                <Text style={styles.emptyTitle}>No live {selectedLiveRecordType} records found</Text>
-                <Text style={styles.emptySubText}>
-                  Grant permissions or use "Log Data" above to add new health entries.
-                </Text>
-              </View>
-            ) : (
-              liveHCRecords.map((rec: any, idx: number) => {
-                const meta = getRecordMeta(selectedLiveRecordType);
-                const recordTime = rec.startTime || rec.time;
-                return (
-                  <View key={rec.metadata?.id || idx} style={styles.recordCard}>
-                    <View style={styles.recordTopRow}>
-                      <View style={[styles.recordIconWrap, { backgroundColor: meta.soft }]}>
-                        <Text style={styles.recordIcon}>{meta.icon}</Text>
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <View style={styles.recordHeader}>
-                          <Text style={[styles.recordType, { color: meta.color }]}>
-                            {selectedLiveRecordType}
-                          </Text>
-                          {recordTime && (
-                            <Text style={styles.recordTime}>
-                              {new Date(recordTime).toLocaleTimeString([], {
-                                hour: '2-digit',
-                                minute: '2-digit',
-                              })}
-                            </Text>
-                          )}
-                        </View>
-                        <Text style={styles.payloadSummary}>
-                          {formatLiveRecordSummary(rec, selectedLiveRecordType)}
-                        </Text>
-                        <Text style={styles.recordHcId} numberOfLines={1}>
-                          ID: {rec.metadata?.id}
-                        </Text>
-                      </View>
-                    </View>
-                  </View>
-                );
-              })
-            )}
-          </View>
-        )}
-
-        {/* TAB 3: Sync Console */}
-        {activeTab === 'sync_console' && (
-          <View style={styles.tabContent}>
-            <View style={styles.explorerHeaderRow}>
-              <Text style={styles.explorerTitle}>Sync State Engine</Text>
-              <TouchableOpacity
-                style={[styles.recordTag, { backgroundColor: C.primarySoft }]}
-                onPress={() => handleTestTokenRecovery('Steps')}
-              >
-                <Text style={[styles.recordTagText, { color: C.primary }]}>Test Recovery</Text>
-              </TouchableOpacity>
-            </View>
-
-            {DEFAULT_SYNC_RECORD_TYPES.map((type) => {
-              const state = syncStates[type];
-              const granted = permissionInfo?.grantedPermissions || [];
-              const hasReadPerm = isPermissionGranted(granted, type, 'read');
-
-              let statusText = state?.status || (hasReadPerm ? 'idle' : 'no_permission');
-              if (!hasReadPerm && statusText !== 'syncing') {
-                statusText = 'no_permission';
-              }
-
-              let statusColor = C.textMuted;
-              let statusLabel = 'UNINITIALIZED';
-
-              if (statusText === 'idle') {
-                statusColor = C.green;
-                statusLabel = 'SYNCED';
-              } else if (statusText === 'syncing') {
-                statusColor = C.primary;
-                statusLabel = 'SYNCING';
-              } else if (statusText === 'no_permission') {
-                statusColor = C.amber;
-                statusLabel = 'NO PERMISSION';
-              } else if (statusText === 'token_expired') {
-                statusColor = C.rose;
-                statusLabel = 'EXPIRED';
-              } else if (statusText === 'error') {
-                statusColor = C.red;
-                statusLabel = 'ERROR';
-              }
-
-              return (
-                <View key={type} style={styles.syncStateCard}>
-                  <View style={styles.recordTopRow}>
-                    <View style={[styles.recordIconWrap, { backgroundColor: getRecordMeta(type).soft }]}>
-                      <Text style={styles.recordIcon}>{getRecordMeta(type).icon}</Text>
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <View style={styles.recordHeader}>
-                        <Text style={styles.syncRecordType}>{type}</Text>
-                        <View style={[styles.statusPill, { backgroundColor: statusColor + '26' }]}>
-                          <View style={[styles.statusDot, styles.dotSm, { backgroundColor: statusColor }]} />
-                          <Text style={[styles.statusPillText, { color: statusColor }]}>
-                            {statusLabel}
-                          </Text>
-                        </View>
-                      </View>
-                      <Text style={styles.syncMetaText}>
-                        Token: {state?.changesToken ? `${state.changesToken.substring(0, 18)}…` : 'None — initial sync needed'}
-                      </Text>
-                      <Text style={styles.syncMetaText}>
-                        Last sync: {state?.lastSuccessfulSyncAt ? new Date(state.lastSuccessfulSyncAt).toLocaleString() : 'Never'}
-                      </Text>
-                      {state?.errorMessage && statusText !== 'no_permission' && (
-                        <Text style={[styles.syncMetaText, { color: C.red, marginTop: 3 }]} numberOfLines={2}>
-                          Error: {state.errorMessage}
-                        </Text>
-                      )}
-                    </View>
-                  </View>
-
-                  <View style={styles.syncActionRow}>
-                    {statusText === 'no_permission' ? (
-                      <TouchableOpacity
-                        style={[styles.smallButton, { backgroundColor: C.amber }]}
-                        onPress={async () => {
-                          await requestPermissionsForRecord(type, ['read', 'write']);
-                          const updated = await checkHealthPermissions();
-                          setPermissionInfo(updated);
-                          await SyncManager.syncRecordType(type);
-                          await refreshAllData();
-                        }}
-                      >
-                        <Text style={[styles.smallButtonText, { color: '#0F172A' }]}>Grant Access</Text>
-                      </TouchableOpacity>
-                    ) : statusText === 'token_expired' ? (
-                      <TouchableOpacity
-                        style={[styles.smallButton, { backgroundColor: C.rose }]}
-                        onPress={() => handleTestTokenRecovery(type)}
-                      >
-                        <Text style={styles.smallButtonText}>Recover Token</Text>
-                      </TouchableOpacity>
-                    ) : (
-                      <TouchableOpacity
-                        style={styles.smallButton}
-                        onPress={() => SyncManager.syncRecordType(type).then(() => refreshAllData())}
-                      >
-                        <Text style={styles.smallButtonText}>Sync Type</Text>
-                      </TouchableOpacity>
-                    )}
-                    <TouchableOpacity
-                      style={styles.smallOutlineButton}
-                      onPress={() => resetSyncState(type).then(() => refreshAllData())}
-                    >
-                      <Text style={styles.smallOutlineText}>Reset State</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
+  const handleClearDatabase = useCallback(() => {
+    Alert.alert(
+      'Clear local cache',
+      'This removes the locally mirrored records and sync cursors. Health Connect data is not touched and will be re-synced.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear',
+          style: 'destructive',
+          onPress: () => {
+            void localRecords
+              .clear()
+              .then(() => engine.resetState())
+              .then(() =>
+                setNotice({ tone: 'info', text: 'Local cache cleared. It will rebuild on the next sync.' })
+              )
+              .catch((caught) =>
+                setNotice({
+                  tone: 'error',
+                  text: caught instanceof Error ? caught.message : String(caught),
+                })
               );
-            })}
-          </View>
-        )}
+          },
+        },
+      ]
+    );
+  }, [localRecords, engine]);
 
-        {/* Footer padding */}
-        <View style={{ height: 40 }} />
+  const handleRevoke = useCallback(async () => {
+    const revoked = await health.revokePermissions();
+    setNotice({
+      tone: revoked ? 'info' : 'error',
+      text: revoked
+        ? 'Permissions revoked. Restart the app for the change to take effect.'
+        : 'Could not revoke permissions — try again from Health Connect settings.',
+    });
+  }, [health]);
+
+  // ── Derived UI state ─────────────────────────────────────────────────────
+  const connection: ConnectionState = !ready
+    ? health.phase === 'checking'
+      ? 'checking'
+      : 'unavailable'
+    : hasAnyPermission
+      ? 'connected'
+      : 'no_permission';
+
+  const tabs: TabDefinition[] = [
+    { key: 'explorer', label: 'Records', icon: '🗂', count: localRecords.records.length },
+    { key: 'live', label: 'Live', icon: '📡' },
+    { key: 'sync_console', label: 'Sync', icon: '⚙️' },
+  ];
+
+  const missingLabels = health.missing
+    .slice(0, 6)
+    .map((permission) => getRecordMeta(permission.recordType).label);
+
+  // ── Gate screens ─────────────────────────────────────────────────────────
+  if (health.phase === 'checking') {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <LoadingState label="Connecting to Health Connect…" />
+      </SafeAreaView>
+    );
+  }
+
+  if (health.phase === 'unavailable' || health.phase === 'update_required') {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <View style={styles.gate}>
+          <EmptyState
+            icon={health.phase === 'update_required' ? '🛠' : '📵'}
+            title={
+              health.phase === 'update_required'
+                ? 'Health Connect needs an update'
+                : 'Health Connect is not available'
+            }
+            message={health.message}
+            actionLabel="Open Health Connect settings"
+            onAction={() => void health.openSystemSettings()}
+          />
+          <Text onPress={() => void health.initialize()} style={styles.retryLink}>
+            Tap to retry
+          </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ── Main dashboard ───────────────────────────────────────────────────────
+  return (
+    <SafeAreaView style={styles.safe} edges={['top']}>
+      <DashboardHeader
+        connection={connection}
+        connectionDetail={hasAnyPermission ? health.message : 'Permissions required'}
+        refreshing={summary.loading || localRecords.loading}
+        onRefresh={() => void handleRefresh()}
+        onLogData={() => setLogModalOpen(true)}
+      />
+
+      <TabBar tabs={tabs} active={activeTab} onChange={setActiveTab} />
+
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={summary.loading || localRecords.loading}
+            onRefresh={() => void handleRefresh()}
+            tintColor={C.primary}
+            colors={[C.primary]}
+          />
+        }
+      >
+        {notice ? <Banner tone={notice.tone} title={notice.text} onDismiss={() => setNotice(null)} /> : null}
+
+        {summary.error ? (
+          <Banner
+            tone="warning"
+            title="Metrics partially unavailable"
+            message={summary.error}
+            onDismiss={() => undefined}
+          />
+        ) : null}
+
+        {health.error ? (
+          <Banner tone="error" title="Health Connect error" message={health.error} />
+        ) : null}
+
+        <MetricsPanel
+          summary={summary.summary}
+          loading={summary.loading}
+          range={summary.range}
+          onRangeChange={summary.setRange}
+          permissionHint={
+            hasAnyPermission && !health.hasAllPermissions
+              ? 'Some data types stay hidden until their permission is granted.'
+              : undefined
+          }
+        />
+
+        <PermissionPanel
+          grantedCount={health.grantedCount}
+          totalCount={health.totalCount}
+          hasAllPermissions={health.hasAllPermissions}
+          missingLabels={missingLabels}
+          busy={health.busy}
+          onRequestAll={() => void health.requestAllPermissions()}
+          onOpenSettings={() => void health.openSystemSettings()}
+          onOpenDataManagement={() => void health.openDataManagementScreen()}
+          onRevoke={() => void handleRevoke()}
+        />
+
+        <View style={styles.tabContent}>
+          {activeTab === 'explorer' ? (
+            <ExplorerPanel
+              records={localRecords.records}
+              loading={localRecords.loading}
+              error={localRecords.error}
+              onRunSync={() => void handleRunSync()}
+              onClearDatabase={handleClearDatabase}
+              syncDisabled={engine.syncing || !ready}
+            />
+          ) : null}
+
+          {activeTab === 'live' ? <LivePanel live={live} /> : null}
+
+          {activeTab === 'sync_console' ? (
+            <SyncConsole
+              engine={engine}
+              lastSummary={engine.lastSummary}
+              onTestRecovery={() => void engine.recover('Steps')}
+            />
+          ) : null}
+        </View>
       </ScrollView>
 
-
-      {/* Log Data Modal */}
-      <Modal visible={isModalOpen} animationType="slide" transparent>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            <View style={styles.modalHandle} />
-            <View style={styles.modalHeaderRow}>
-              <Text style={styles.modalTitle}>Log Health Record</Text>
-              <TouchableOpacity style={styles.modalClose} onPress={() => setIsModalOpen(false)}>
-                <Text style={styles.modalCloseText}>✕</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Select Record Type */}
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: S.lg }}>
-              {(['Steps', 'Weight', 'HeartRate', 'BloodPressure', 'Hydration'] as const).map((t) => {
-                const meta = getRecordMeta(t);
-                return (
-                  <TouchableOpacity
-                    key={t}
-                    style={[
-                      styles.chip,
-                      logType === t && styles.chipActive,
-                      logType === t && { borderColor: meta.color },
-                    ]}
-                    onPress={() => setLogType(t)}
-                  >
-                    <Text style={styles.chipIcon}>{meta.icon}</Text>
-                    <Text style={[styles.chipText, logType === t && styles.chipTextActive]}>{t}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
-
-            {/* Inputs */}
-            {logType === 'Steps' && (
-              <View>
-                <Text style={styles.inputLabel}>Step Count</Text>
-                <TextInput
-                  style={styles.textInput}
-                  placeholder="e.g. 5000"
-                  placeholderTextColor={C.textMuted}
-                  keyboardType="number-pad"
-                  value={inputVal1}
-                  onChangeText={setInputVal1}
-                />
-              </View>
-            )}
-
-            {logType === 'Weight' && (
-              <View>
-                <Text style={styles.inputLabel}>Weight (in Kilograms)</Text>
-                <TextInput
-                  style={styles.textInput}
-                  placeholder="e.g. 72.5"
-                  placeholderTextColor={C.textMuted}
-                  keyboardType="decimal-pad"
-                  value={inputVal1}
-                  onChangeText={setInputVal1}
-                />
-              </View>
-            )}
-
-            {logType === 'HeartRate' && (
-              <View>
-                <Text style={styles.inputLabel}>Beats Per Minute (BPM)</Text>
-                <TextInput
-                  style={styles.textInput}
-                  placeholder="e.g. 75"
-                  placeholderTextColor={C.textMuted}
-                  keyboardType="number-pad"
-                  value={inputVal1}
-                  onChangeText={setInputVal1}
-                />
-              </View>
-            )}
-
-            {logType === 'BloodPressure' && (
-              <View>
-                <Text style={styles.inputLabel}>Systolic (mmHg)</Text>
-                <TextInput
-                  style={styles.textInput}
-                  placeholder="e.g. 120"
-                  placeholderTextColor={C.textMuted}
-                  keyboardType="number-pad"
-                  value={inputVal1}
-                  onChangeText={setInputVal1}
-                />
-                <Text style={[styles.inputLabel, { marginTop: S.md }]}>Diastolic (mmHg)</Text>
-                <TextInput
-                  style={styles.textInput}
-                  placeholder="e.g. 80"
-                  placeholderTextColor={C.textMuted}
-                  keyboardType="number-pad"
-                  value={inputVal2}
-                  onChangeText={setInputVal2}
-                />
-              </View>
-            )}
-
-            {logType === 'Hydration' && (
-              <View>
-                <Text style={styles.inputLabel}>Water Volume (Liters)</Text>
-                <TextInput
-                  style={styles.textInput}
-                  placeholder="e.g. 0.5"
-                  placeholderTextColor={C.textMuted}
-                  keyboardType="decimal-pad"
-                  value={inputVal1}
-                  onChangeText={setInputVal1}
-                />
-              </View>
-            )}
-
-            {/* Modal Buttons */}
-            <View style={styles.modalButtonRow}>
-              <TouchableOpacity
-                style={[styles.actionButton, styles.actionSecondary, { flex: 1 }]}
-                onPress={() => setIsModalOpen(false)}
-              >
-                <Text style={styles.actionSecondaryText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.actionButton, styles.actionPrimary, { flex: 1 }]}
-                onPress={handleSaveNewData}
-                disabled={loading}
-              >
-                {loading ? (
-                  <ActivityIndicator color="#fff" size="small" />
-                ) : (
-                  <>
-                    <Text style={styles.actionIcon}>💾</Text>
-                    <Text style={styles.actionText}>Save Record</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      <LogDataModal
+        visible={logModalOpen}
+        saving={savingRecord}
+        onClose={() => setLogModalOpen(false)}
+        onSave={(values) => void handleSaveRecord(values)}
+      />
     </SafeAreaView>
   );
 }
 
-
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: C.bg,
-  },
-  container: {
-    padding: S.lg,
-    paddingBottom: 0,
-  },
-
-  /* Hero */
-  hero: {
-    marginBottom: S.lg,
-  },
-  heroTopRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: S.md,
-  },
-  greeting: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: C.textSecondary,
-  },
-  heroTitle: {
-    fontSize: 28,
-    fontWeight: '800',
-    color: C.text,
-    letterSpacing: 0.3,
-    marginTop: 2,
-  },
-  heroSubtitle: {
-    fontSize: 13,
-    fontWeight: '500',
-    color: C.textMuted,
-    marginTop: 4,
-  },
-  heroAvatar: {
-    width: 56,
-    height: 56,
-    borderRadius: R.lg,
-    backgroundColor: C.primarySoft,
-    borderWidth: 1,
-    borderColor: C.primary + '40',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  heroAvatarIcon: {
-    fontSize: 26,
-  },
-
-  /* Status card */
-  statusCard: {
-    flexDirection: 'row',
-    backgroundColor: C.surface,
-    borderRadius: R.lg,
-    borderWidth: 1,
-    borderColor: C.borderSoft,
-    paddingVertical: S.md,
-    marginBottom: S.sm,
-  },
-  statusItem: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: S.sm,
-    gap: 6,
-  },
-  statusItemBordered: {
-    borderLeftWidth: 1,
-    borderLeftColor: C.borderSoft,
-  },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-  },
-  dotSm: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  dotGreen: { backgroundColor: C.green },
-  dotRed: { backgroundColor: C.red },
-  dotAmber: { backgroundColor: C.amber },
-  statusItemText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: C.textSecondary,
+  safe: { flex: 1, backgroundColor: C.bg },
+  gate: { flex: 1, justifyContent: 'center', padding: S.xl },
+  retryLink: {
+    marginTop: S.lg,
     textAlign: 'center',
-  },
-
-  /* Quick links */
-  quickLinksRow: {
-    flexDirection: 'row',
-    gap: S.sm,
-    marginBottom: S.lg,
-  },
-  quickLink: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.borderSoft,
-    borderRadius: R.md,
-    paddingVertical: 10,
-  },
-  quickLinkIcon: {
-    fontSize: 15,
-  },
-  quickLinkText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: C.textSecondary,
-  },
-
-  /* Error */
-  errorBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: S.md,
-    backgroundColor: C.redSoft,
-    borderWidth: 1,
-    borderColor: C.red + '40',
-    borderRadius: R.md,
-    padding: S.md,
-    marginBottom: S.lg,
-  },
-  errorIcon: {
-    fontSize: 20,
-  },
-  errorTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: C.red,
-    marginBottom: 2,
-  },
-  errorText: {
-    fontSize: 12,
-    color: C.textSecondary,
-    lineHeight: 17,
-  },
-
-  /* Section header */
-  sectionHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: S.md,
-  },
-  sectionTitle: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: C.text,
-  },
-  sectionBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: C.greenSoft,
-    paddingHorizontal: 9,
-    paddingVertical: 4,
-    borderRadius: R.pill,
-  },
-  sectionBadgeText: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: C.green,
-    letterSpacing: 0.5,
-  },
-
-
-  /* Metrics grid */
-  metricsGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: S.sm,
-    marginBottom: S.lg,
-  },
-  metricCardWrap: {
-    width: '47.5%',
-  },
-  metricCard: {
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.borderSoft,
-    borderRadius: R.lg,
-    padding: S.md,
-  },
-  metricIconWrap: {
-    width: 34,
-    height: 34,
-    borderRadius: R.md,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 10,
-  },
-  metricIcon: {
-    fontSize: 16,
-  },
-  metricLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: C.textMuted,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  metricValue: {
-    fontSize: 24,
-    fontWeight: '800',
-    marginTop: 2,
-  },
-  metricUnit: {
-    fontSize: 11,
-    fontWeight: '500',
-    color: C.textMuted,
-    marginTop: 2,
-  },
-  metricGoal: {
-    fontSize: 10,
-    fontWeight: '600',
-    color: C.textMuted,
-    marginTop: 5,
-  },
-  barTrack: {
-    height: 5,
-    borderRadius: 3,
-    marginTop: 10,
-    overflow: 'hidden',
-  },
-  barFill: {
-    height: '100%',
-    borderRadius: 3,
-  },
-  liveDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: C.mint,
-  },
-
-  /* Action buttons */
-  actionRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: S.sm,
-    marginBottom: S.xl,
-  },
-  actionButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    borderRadius: R.pill,
-    paddingVertical: 13,
-    paddingHorizontal: S.lg,
-    flexGrow: 1,
-  },
-  actionPrimary: {
-    backgroundColor: C.primary,
-    shadowColor: C.primary,
-    shadowOffset: { width: 0, height: 5 },
-    shadowOpacity: 0.38,
-    shadowRadius: 14,
-    elevation: 8,
-  },
-  actionSync: {
-    backgroundColor: C.teal + '26',
-    borderWidth: 1,
-    borderColor: C.teal + '66',
-  },
-  actionSecondary: {
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.border,
-  },
-  actionIcon: {
-    fontSize: 14,
-  },
-  actionText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: '#fff',
-  },
-  actionSecondaryText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: C.textSecondary,
-  },
-
-  /* Tab bar */
-  tabBar: {
-    flexDirection: 'row',
-    backgroundColor: C.surface,
-    borderRadius: R.pill,
-    padding: 4,
-    marginBottom: S.lg,
-    borderWidth: 1,
-    borderColor: C.borderSoft,
-  },
-  tabItem: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 9,
-    borderRadius: R.pill,
-    overflow: 'hidden',
-  },
-  tabPill: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: C.primary,
-    borderRadius: R.pill,
-  },
-  tabText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: C.textMuted,
-  },
-  tabTextActive: {
-    color: '#fff',
-  },
-
-  /* Tab content */
-  tabContent: {
-    marginBottom: S.lg,
-  },
-  filterBar: {
-    marginBottom: S.md,
-  },
-
-
-  /* Chips */
-  chip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: R.pill,
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.borderSoft,
-    marginRight: 8,
-  },
-  chipActive: {
-    backgroundColor: C.primarySoft,
-    borderColor: C.primary,
-  },
-  chipIcon: {
-    fontSize: 12,
-  },
-  chipText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: C.textSecondary,
-  },
-  chipTextActive: {
-    color: C.primary,
-  },
-
-  /* Explorer header */
-  explorerHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: S.md,
-    gap: S.sm,
-  },
-  explorerTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: C.text,
-    flexShrink: 1,
-  },
-  explorerCount: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: C.primary,
-  },
-  dangerLink: {
-    backgroundColor: C.redSoft,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: R.pill,
-  },
-  dangerLinkText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: C.red,
-  },
-
-  /* Empty state */
-  emptyState: {
-    alignItems: 'center',
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.borderSoft,
-    borderRadius: R.xl,
-    padding: S.xxl,
-    gap: 6,
-  },
-  emptyIcon: {
-    fontSize: 40,
-    marginBottom: 4,
-  },
-  emptyTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: C.text,
-  },
-  emptySubText: {
-    fontSize: 12,
-    color: C.textMuted,
-    textAlign: 'center',
-    lineHeight: 18,
-    maxWidth: 260,
-  },
-
-
-  /* Record cards */
-  recordCard: {
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.borderSoft,
-    borderRadius: R.lg,
-    padding: S.md,
-    marginBottom: S.sm,
-  },
-  recordTopRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: S.md,
-  },
-  recordIconWrap: {
-    width: 38,
-    height: 38,
-    borderRadius: R.md,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  recordIcon: {
-    fontSize: 17,
-  },
-  recordHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: S.sm,
-  },
-  recordType: {
+    color: C.mint,
     fontSize: 13,
     fontWeight: '800',
-    flexShrink: 1,
   },
-  recordTime: {
-    fontSize: 11,
-    fontWeight: '500',
-    color: C.textMuted,
-  },
-  payloadSummary: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: C.text,
-    marginTop: 2,
-  },
-  chevron: {
-    fontSize: 22,
-    fontWeight: '400',
-    color: C.textMuted,
-    transform: [{ rotate: '0deg' }],
-  },
-  chevronOpen: {
-    transform: [{ rotate: '90deg' }],
-  },
-  expandedBox: {
-    marginTop: S.md,
-    paddingTop: S.md,
-    borderTopWidth: 1,
-    borderTopColor: C.borderSoft,
-    gap: 3,
-  },
-  recordOrigin: {
-    fontSize: 10,
-    color: C.textMuted,
-  },
-  recordHcId: {
-    fontSize: 10,
-    color: C.textMuted,
-    fontFamily: 'monospace',
-  },
-  recordTag: {
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: R.pill,
-  },
-  recordTagText: {
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  jsonBox: {
-    backgroundColor: C.surfaceDeep,
-    padding: 10,
-    borderRadius: R.sm,
-    marginTop: 6,
-  },
-  jsonText: {
-    fontSize: 10,
-    color: '#86EFAC',
-    fontFamily: 'monospace',
-  },
-
-
-  /* Sync console */
-  syncStateCard: {
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.borderSoft,
-    borderRadius: R.lg,
-    padding: S.md,
-    marginBottom: S.sm,
-  },
-  syncRecordType: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: C.text,
-    flexShrink: 1,
-  },
-  statusPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: R.pill,
-  },
-  statusPillText: {
-    fontSize: 10,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-    letterSpacing: 0.4,
-  },
-  syncMetaText: {
-    fontSize: 11,
-    color: C.textSecondary,
-    marginTop: 3,
-  },
-  syncActionRow: {
-    flexDirection: 'row',
-    gap: S.sm,
-    marginTop: S.md,
-  },
-  smallButton: {
-    backgroundColor: C.primary,
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderRadius: R.sm,
-  },
-  smallButtonText: {
-    fontSize: 11,
-    color: '#fff',
-    fontWeight: '700',
-  },
-  smallOutlineButton: {
-    borderWidth: 1,
-    borderColor: C.border,
-    paddingHorizontal: 14,
-    paddingVertical: 7,
-    borderRadius: R.sm,
-  },
-  smallOutlineText: {
-    fontSize: 11,
-    color: C.textSecondary,
-    fontWeight: '600',
-  },
-
-
-  /* Modal */
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(4, 7, 15, 0.8)',
-    justifyContent: 'flex-end',
-  },
-  modalContent: {
-    backgroundColor: C.surface,
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    padding: S.xl,
-    paddingBottom: S.xxl,
-    borderTopWidth: 1,
-    borderTopColor: C.border,
-  },
-  modalHandle: {
-    alignSelf: 'center',
-    width: 40,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: C.border,
-    marginBottom: S.lg,
-  },
-  modalHeaderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: S.lg,
-  },
-  modalTitle: {
-    fontSize: 19,
-    fontWeight: '800',
-    color: C.text,
-  },
-  modalClose: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: C.surfaceAlt,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  modalCloseText: {
-    fontSize: 12,
-    color: C.textSecondary,
-    fontWeight: '700',
-  },
-  inputLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: C.textSecondary,
-    marginBottom: 6,
-  },
-  textInput: {
-    backgroundColor: C.surfaceDeep,
-    borderRadius: R.md,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    color: C.text,
-    fontSize: 15,
-    borderWidth: 1,
-    borderColor: C.borderSoft,
-  },
-  modalButtonRow: {
-    flexDirection: 'row',
-    gap: S.sm,
-    marginTop: S.xl,
-  },
+  scroll: { flex: 1 },
+  scrollContent: { paddingHorizontal: S.lg, paddingBottom: S.xxl, flexGrow: 1 },
+  tabContent: { flex: 1, minHeight: 420 },
 });
+

@@ -2,6 +2,8 @@
 
 A React Native (Expo) application that integrates with Android's **Health Connect** platform to read, write, and sync health & fitness data. Built with TypeScript and designed with a dark-themed dashboard UI.
 
+**[📱 Download Latest Android APK](https://expo.dev/accounts/amie.code/projects/rn-health-connect/builds/7e709d57-868e-426b-857e-b72edc605ebe)**
+
 ## Features
 
 - **Health Connect Integration** — Full read/write access to Android Health Connect APIs
